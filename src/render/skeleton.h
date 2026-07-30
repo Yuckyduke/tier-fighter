@@ -52,6 +52,31 @@ struct Anim {
 // the game cannot disagree about what a state looks like.
 Pose poseFor(ActionState st, int stateFrame, uint8_t attackId);
 
+// --- Sequences ---------------------------------------------------------------
+// A pose in isolation says little; what usually reads badly is the TRANSITION
+// between two states. A sequence chains states back-to-back, each held for its own
+// natural duration, so the editor can play a realistic action and expose the seams:
+// a lean that snaps, a figure that pops up too fast, limbs that jump between poses.
+//
+// These mirror sequences a player actually performs, not arbitrary orderings.
+constexpr int kMaxSeqSteps = 8;
+
+struct Sequence {
+    const char *name;
+    ActionState steps[kMaxSeqSteps];
+    int count;
+};
+
+int sequenceCount();
+const Sequence &sequenceAt(int i);
+
+// Which step of a sequence is playing at `frame`, and how far into that step we are.
+// Returns false once the sequence has finished.
+bool sequenceSample(const Sequence &seq, int frame, int *outStep, int *outStepFrame);
+
+// How long a state's animation runs for, used by both Lerp timing and sequences.
+int stateDuration(ActionState st);
+
 // Editable table, indexed by ActionState. Exposed so the editor can mutate it live.
 Anim &animFor(ActionState st);
 const char *stateLabel(ActionState st);
