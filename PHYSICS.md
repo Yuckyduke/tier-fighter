@@ -305,6 +305,14 @@ through the entire freeze.
 We add a per-freeze cap (`maxNudgesPerHitlag`) that they do not have, so a long
 freeze cannot be ridden across the stage by mashing.
 
+## The full gap list
+
+Every remaining divergence is enumerated in **[PLAN.md](PLAN.md)**, grouped by
+whether it is a mechanic worth building, blocked on stage geometry, a structural
+refinement, deliberately not ported, or out of scope entirely. That grouping matters:
+the raw coverage percentage counts items that will never be built here (items,
+bosses, status effects), so reading it as a to-do list overstates the work.
+
 ## Measuring coverage
 
 `tools/coverage.py` extracts every field from both attribute structs and diffs them
