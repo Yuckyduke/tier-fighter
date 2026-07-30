@@ -50,8 +50,8 @@ client (CMake will warn and skip the `tf_play` target).
 ## Running
 
 ```sh
-./build/tf_play          # local 2-player playtest
-./build/tf_poses         # stick-figure pose editor (see POSES.md)
+./build/tf_play          # the game: local 2-player sparring
+./build/tf_poses         # pose editor -- animation work, no gameplay
 ./build/tf_tests         # simulation tests
 ./build/tf_arena_tests   # arena / matchmaking tests
 ```
@@ -81,6 +81,21 @@ analog stick angles that a keyboard can only express as a 45° diagonal.
 
 **Debug keys:** `K` stick figures / boxes · `H` hitboxes · `P` pause · `N` step one
 frame · `Alt` slow-mo · `R` reset · `Tab` hide help
+
+### Looking at the poses
+
+Fighters are stick figures drawn from joint-angle data. There's a dedicated editor:
+
+```sh
+./build/tf_poses
+```
+
+Press `M` for **sequence mode**, which chains states back-to-back (wavedash,
+dash-dance, knockdown recovery) so you can see transitions rather than isolated
+poses — transitions are where problems actually show up. `[` and `]` page through.
+
+Full workflow, including how to edit a pose and paste it back:
+**[POSES.md](POSES.md)**.
 
 ### Techniques to try
 
@@ -156,6 +171,7 @@ Longer write-ups live alongside the code:
 - **[PHYSICS.md](PHYSICS.md)** — physics systems, what's implemented, what's missing
 - **[STATES.md](STATES.md)** — action-state design
 - **[POSES.md](POSES.md)** — stick-figure poses and the pose editor
+- **[PLAN.md](PLAN.md)** — engineering plan: what's done, what's next, what's deferred
 
 One idea worth pulling out, because it shaped everything else:
 
@@ -187,6 +203,10 @@ Not built yet:
 - **Front end.** No menus, so `tf_play` drops straight into a hardcoded match.
 - **Arena wiring.** Stage pooling and KO scoring are implemented and tested but
   the client still runs a single bare match.
+
+**[PLAN.md](PLAN.md)** tracks what's left, in priority order, with task checklists
+and the reasoning behind the ordering. It's the place to look for "what should I work
+on next?".
 - **Art.** Fighters are procedural stick figures rather than sprites — 42 action
   states would otherwise mean 40+ hand-drawn animations per character. Poses are
   authored as joint angles in a dedicated editor; see [POSES.md](POSES.md).
