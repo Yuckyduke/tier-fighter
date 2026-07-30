@@ -24,6 +24,16 @@ enum class ActionState : uint8_t {
     Jumpsquat,
     Airborne,
     Landing,
+
+    // --- Ground movement, split ----------------------------------------------
+    // Dash is the initial burst and is INTERRUPTIBLE -- flicking the stick
+    // re-enters it, which is what makes dash-dancing possible. Run is the
+    // committed sustained sprint and is NOT interruptible: leaving it requires
+    // RunBrake. Turn is the standing reversal, a timed commitment rather than a
+    // free flip of `facing`.
+    Run,
+    RunBrake,
+    Turn,
     AttackGround,
     AttackAir,
     AirDodge,
@@ -148,6 +158,10 @@ struct Player {
     uint8_t bounceCount = 0;
     // Roll direction while in GetUpRoll: -1 left, +1 right.
     int8_t rollDir = 0;
+    // Frames remaining in a timed ground action (turn, run-brake). Latched on
+    // entry so the duration cannot be re-derived mid-action.
+    uint8_t groundActionFrames = 0;
+
     // Buttons pressed while a get-up option was still locked out. Without this a
     // player who mashes on knockdown has the press consumed during lockout and
     // must release and re-press -- the input would silently vanish.

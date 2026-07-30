@@ -177,6 +177,16 @@ int applyDI(int angleDeg, const Input &in, int8_t attackerFacing) {
 // Fast motion brakes hard so a dash does not coast like ice; slow motion keeps the
 // low base value so a wavedash retains its long glide. A single flat value cannot
 // deliver both -- see the note in GroundMove.
+// Friction with an explicit value, for states that brake harder than normal
+// (run-brake). Kept separate so the two-tier speed rule still applies underneath.
+void applyGroundFrictionScaled(Player &p, fx amount) {
+    const Fighter &F = fighterOf(p);
+    const fx speed = fx_abs(p.selfVelX);
+    const fx friction =
+        (speed > F.ground.walkSpeed) ? fx_mul(amount, F.ground.fastMultiplier) : amount;
+    p.selfVelX = fx_decay(p.selfVelX, friction);
+}
+
 void applyGroundFriction(Player &p) {
     const Fighter &F = fighterOf(p);
     const fx speed = fx_abs(p.selfVelX);
@@ -279,33 +289,174 @@ void startAttack(Player &p, uint8_t attackId, bool airborne) {
     if (atk.selfVelX != 0) p.selfVelX = atk.selfVelX * p.facing;
 }
 
-void handleGroundMovement(Player &p, const Input &in, const Input &prev) {
+// Enter a dash, applying the initial impulse.
+//
+// The impulse is VELOCITY-RELATIVE, from ftCo_Dash_Enter: if you are already
+// moving against your new facing you get the full dashInitVel, otherwise only the
+// difference up to it. That is why a dash reversal snaps but continuing a dash
+// stays smooth -- one rule, two feels.
+void enterDash(Player &p, int8_t dir) {
     const Fighter &F = fighterOf(p);
+    p.facing = dir;
+
+    const fx target = F.ground.dashInitVel * dir;
+    if ((p.selfVelX > 0) != (dir > 0) && p.selfVelX != 0) {
+        p.selfVelX = target; // reversing: full impulse
+    } else if (fx_abs(p.selfVelX) < fx_abs(target)) {
+        p.selfVelX = target; // slower than the impulse: snap up
+    }
+    // Already faster than the impulse: keep the momentum, do not slow down.
+
+    // Saturate the stick timer so the flick that STARTED this dash cannot
+    // immediately re-trigger a fresh one. (They set 0xFE here for the same reason.)
+    p.stickHeldX = kSmash.stickTimerMax;
+    enterState(p, ActionState::Dash);
+}
+
+// Accelerate ground velocity toward a target, with an optional taper.
+//
+// Run tapers by (1 - vel/target): hard acceleration at low speed, easing into the
+// cap. From ftCo_Run_Phys. Without it a run hits top speed abruptly and reads as a
+// switch rather than a build-up.
+void accelGround(Player &p, fx accel, fx target, bool taper) {
+    const Fighter &F = fighterOf(p);
+
+    if (taper && target != 0) {
+        const fx frac = fx_div(p.selfVelX, target);
+        if (frac > 0 && frac < kFxOne) {
+            accel = fx_mul(accel, fx_mul(kFxOne - frac, F.ground.runTaper));
+        }
+    }
+
+    if (target > 0) {
+        p.selfVelX = fx_min(p.selfVelX + accel, fx_max(target, p.selfVelX));
+    } else {
+        p.selfVelX = fx_max(p.selfVelX - accel, fx_min(target, p.selfVelX));
+    }
+    p.selfVelX = fx_clamp(p.selfVelX, -F.ground.maxHorizontal, F.ground.maxHorizontal);
+}
+
+// Shared entry checks for every actionable grounded state: jump and attack.
+// Returns true if a new action was started.
+bool checkGroundActions(Player &p, const Input &in, const Input &prev) {
     if (in.pressed(BtnJump, prev)) {
         enterState(p, ActionState::Jumpsquat);
         p.jumpHeld = true;
-        return;
+        return true;
     }
     if (in.pressed(BtnAttack, prev)) {
-        // Face the input before committing, so a flick-and-attack in the opposite
-        // direction turns you around rather than swinging backwards.
+        // Face the input before committing, so a flick-and-attack the other way
+        // turns you around rather than swinging backwards.
         if (in.stickX >= kSmash.deflection)
             p.facing = 1;
         else if (in.stickX <= -kSmash.deflection)
             p.facing = -1;
         startAttack(p, chooseGroundAttack(p, in), false);
+        return true;
+    }
+    return false;
+}
+
+// Idle / Walk. A fresh hard flick starts a dash; a gentler hold walks.
+void handleGroundMovement(Player &p, const Input &in, const Input &prev) {
+    const Fighter &F = fighterOf(p);
+    if (checkGroundActions(p, in, prev)) return;
+
+    const bool deflected = (in.stickX > kStick.deadzone || in.stickX < -kStick.deadzone);
+    if (!deflected) {
+        applyGroundFriction(p);
+        if (p.state != ActionState::Idle) enterState(p, ActionState::Idle);
         return;
     }
 
-    if (in.stickX > kStick.deadzone || in.stickX < -kStick.deadzone) {
-        p.facing = in.stickX > 0 ? 1 : -1;
-        const bool hard = in.stickX > kStick.hard || in.stickX < -kStick.hard;
-        p.selfVelX = (hard ? F.ground.dashSpeed : F.ground.walkSpeed) * p.facing;
-        enterState(p, hard ? ActionState::Dash : ActionState::Walk);
-    } else {
-        applyGroundFriction(p);
-        if (p.state != ActionState::Idle) enterState(p, ActionState::Idle);
+    const int8_t dir = in.stickX > 0 ? 1 : -1;
+    const bool hard = (in.stickX > kStick.hard || in.stickX < -kStick.hard);
+    const bool freshFlick = p.stickHeldX < kSmash.flickWindow;
+
+    // A hard FLICK dashes. A hard hold that is not fresh just walks at top walk
+    // speed -- so you cannot get a dash by leaning on the stick, only by flicking.
+    if (hard && freshFlick) {
+        // Reversing on the spot costs turn frames rather than flipping for free.
+        if (p.facing != dir && p.state != ActionState::Idle) {
+            p.facing = dir;
+            p.groundActionFrames = static_cast<uint8_t>(F.ground.turnFrames);
+            enterState(p, ActionState::Turn);
+            return;
+        }
+        enterDash(p, dir);
+        return;
     }
+
+    // Walking: ramp up rather than snapping. First frame gets walkInitVel.
+    if (p.facing != dir) {
+        p.facing = dir;
+        p.selfVelX = F.ground.walkInitVel * dir;
+    } else if (fx_abs(p.selfVelX) < fx_abs(F.ground.walkInitVel)) {
+        p.selfVelX = F.ground.walkInitVel * dir;
+    }
+    accelGround(p, F.ground.walkAccel, F.ground.walkSpeed * dir, false);
+    if (p.state != ActionState::Walk) enterState(p, ActionState::Walk);
+}
+
+// Dash: the interruptible burst. THIS is where dash-dancing lives.
+//
+// Mirrors ftCo_Dash_CheckInput -- a fresh stick flick either re-enters the dash
+// (same direction) or turns (opposite). Because the re-entry is available every
+// frame of the dash, flicking back and forth keeps producing fresh dashes. Run has
+// no equivalent check, which is precisely why you cannot dance out of a run.
+void handleDash(Player &p, const Input &in, const Input &prev) {
+    const Fighter &F = fighterOf(p);
+    if (checkGroundActions(p, in, prev)) return;
+
+    const int8_t dir = in.stickX > 0 ? 1 : -1;
+    const bool deflected = (in.stickX >= kSmash.deflection || in.stickX <= -kSmash.deflection);
+    const bool freshFlick = p.stickHeldX < kSmash.flickWindow;
+
+    if (deflected && freshFlick) {
+        if (dir != p.facing) {
+            // Dash-dance: reversing out of a dash is quicker than a standing turn.
+            p.facing = dir;
+            p.groundActionFrames = static_cast<uint8_t>(F.ground.dashTurnFrames);
+            enterState(p, ActionState::Turn);
+        } else {
+            enterDash(p, dir); // re-dash, fresh impulse
+        }
+        return;
+    }
+
+    // Still holding the direction: accelerate toward dash speed.
+    if (deflected && dir == p.facing) {
+        accelGround(p, F.ground.dashAccel, F.ground.dashSpeed * dir, false);
+        // The dash window expiring COMMITS you to a run -- no longer interruptible.
+        if (p.stateFrame + 1 >= static_cast<uint16_t>(F.ground.dashFrames)) {
+            enterState(p, ActionState::Run);
+        }
+        return;
+    }
+
+    // Released: brake out of the dash back to neutral.
+    applyGroundFriction(p);
+    if (p.selfVelX == 0) enterState(p, ActionState::Idle);
+}
+
+// Run: committed. No dash re-entry, so no dancing. Leaving requires RunBrake.
+void handleRun(Player &p, const Input &in, const Input &prev) {
+    const Fighter &F = fighterOf(p);
+    if (checkGroundActions(p, in, prev)) return;
+
+    const int8_t dir = in.stickX > 0 ? 1 : -1;
+    const bool holding =
+        (in.stickX >= kSmash.deflection || in.stickX <= -kSmash.deflection) && dir == p.facing;
+
+    if (holding) {
+        // Tapered acceleration -- see accelGround.
+        accelGround(p, F.ground.runAccel, F.ground.dashSpeed * dir, true);
+        return;
+    }
+
+    // Released or reversed: you must brake. That commitment is the cost of running.
+    p.groundActionFrames = static_cast<uint8_t>(F.ground.runBrakeFrames);
+    enterState(p, ActionState::RunBrake);
 }
 
 // Directional air dodge. The wavedash enabler: this sets velocity along the stick,
@@ -1074,10 +1225,42 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
             break;
 
         case ActionState::Idle:
-        case ActionState::Walk:
-        case ActionState::Dash: handleGroundMovement(p, in, prev); break;
+        case ActionState::Walk: handleGroundMovement(p, in, prev); break;
 
-        default:                break;
+        case ActionState::Dash: handleDash(p, in, prev); break;
+
+        case ActionState::Run:  handleRun(p, in, prev); break;
+
+        case ActionState::RunBrake:
+            // Committed stop. Attacks and jumps are allowed out of a brake --
+            // that is the payoff for the commitment, and it is where dash-attack
+            // and run-jump pressure come from.
+            if (checkGroundActions(p, in, prev)) break;
+            applyGroundFrictionScaled(p, F.ground.runBrakeFriction);
+            if (p.groundActionFrames > 0) p.groundActionFrames--;
+            if (p.groundActionFrames == 0 || p.selfVelX == 0) { enterState(p, ActionState::Idle); }
+            break;
+
+        case ActionState::Turn:
+            // Standing/dash reversal. Facing is already flipped; these frames
+            // are the COST of that flip. Jump and attack are available, so a
+            // turnaround can be cancelled into an attack the other way.
+            if (checkGroundActions(p, in, prev)) break;
+            applyGroundFriction(p);
+            if (p.groundActionFrames > 0) p.groundActionFrames--;
+            if (p.groundActionFrames == 0) {
+                // Still holding the new direction? Come out of the turn dashing.
+                const bool holding = (in.stickX >= kSmash.deflection && p.facing > 0) ||
+                                     (in.stickX <= -kSmash.deflection && p.facing < 0);
+                if (holding) {
+                    enterDash(p, p.facing);
+                } else {
+                    enterState(p, ActionState::Idle);
+                }
+            }
+            break;
+
+        default: break;
         }
 
         // --- Integrate -------------------------------------------------------
@@ -1091,8 +1274,9 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
 
         const bool wasGrounded =
             (p.state == ActionState::Idle || p.state == ActionState::Walk ||
-             p.state == ActionState::Dash || p.state == ActionState::Landing ||
-             p.state == ActionState::Jumpsquat ||
+             p.state == ActionState::Dash || p.state == ActionState::Run ||
+             p.state == ActionState::RunBrake || p.state == ActionState::Turn ||
+             p.state == ActionState::Landing || p.state == ActionState::Jumpsquat ||
              // Knockdown states are on the ground, so ground
              // friction and ground knockback decay apply.
              p.state == ActionState::DownWait || p.state == ActionState::GetUp ||
@@ -1116,10 +1300,12 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
         // dropped mid-crouch would eat the jump.
         const bool footingMatters =
             (p.state == ActionState::Idle || p.state == ActionState::Walk ||
-             p.state == ActionState::Dash || p.state == ActionState::Landing ||
-             p.state == ActionState::AttackGround || p.state == ActionState::GetUp ||
-             p.state == ActionState::GetUpRoll || p.state == ActionState::GetUpAttack ||
-             p.state == ActionState::Tech || p.state == ActionState::DownWait);
+             p.state == ActionState::Dash || p.state == ActionState::Run ||
+             p.state == ActionState::RunBrake || p.state == ActionState::Turn ||
+             p.state == ActionState::Landing || p.state == ActionState::AttackGround ||
+             p.state == ActionState::GetUp || p.state == ActionState::GetUpRoll ||
+             p.state == ActionState::GetUpAttack || p.state == ActionState::Tech ||
+             p.state == ActionState::DownWait);
         if (footingMatters) {
             const Stage &st = gs.stage;
             const bool stillSupported = (p.x >= st.platformLeft && p.x <= st.platformRight);
@@ -1306,6 +1492,7 @@ uint32_t checksum(const GameState &gs) {
         mix(static_cast<uint32_t>(p.rollDir));
         mix(p.bufferedButtons);
         mix(p.hitlagFrames);
+        mix(p.groundActionFrames);
         mix(static_cast<uint32_t>(p.ledgeSide));
         mix(p.ledgeHangFrames);
         mix(p.ledgeCooldown);

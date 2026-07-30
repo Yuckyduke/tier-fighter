@@ -464,6 +464,282 @@ void testHelplessLandingCostsMore() {
             "latched the helpless landing lag");
 }
 
+// --- Dash / Run split -------------------------------------------------------
+
+// Drive ground movement with a scripted stick pattern and report the final state.
+ActionState groundStateAfter(int8_t stickX, int frames, uint8_t charId) {
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.charId = charId;
+    p.x = fxi(500);
+    p.y = gs.stage.groundY;
+    p.facing = 1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](int8_t sx) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(0, sx);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+    tick(0); // neutral first, so the next frame is a fresh crossing
+    for (int f = 0; f < frames; ++f)
+        tick(stickX);
+    return gs.players[0].state;
+}
+
+void testDashCommitsToRun() {
+    section("a held dash commits into a run");
+
+    using namespace config;
+    const auto &G = kFighters[CHAR_SCOUT].ground;
+
+    // A hard flick starts a Dash. Holding it past dashFrames COMMITS you to a Run,
+    // which is no longer interruptible -- that transition is what gives running a
+    // cost and makes dash-dancing a distinct option rather than the only one.
+    check(groundStateAfter(99, 1, CHAR_SCOUT) == ActionState::Dash,
+          "a fresh hard flick starts a dash");
+    check(groundStateAfter(99, G.dashFrames - 2, CHAR_SCOUT) == ActionState::Dash,
+          "still dashing inside the dash window");
+    check(groundStateAfter(99, G.dashFrames + 4, CHAR_SCOUT) == ActionState::Run,
+          "holding past the dash window commits to a run");
+}
+
+void testDashDanceHoldsPosition() {
+    section("dash-dancing holds position");
+
+    using namespace config;
+
+    // Dash-dancing works because Dash is INTERRUPTIBLE: ftCo_Dash_CheckInput
+    // re-enters it on every fresh flick. The point of the technique is to threaten
+    // both directions while staying put, so the test that matters is that repeated
+    // reversals do not walk you across the stage.
+    auto danceDrift = [](int cycles) {
+        GameState gs = makeMatch(1);
+        Player &p = gs.players[0];
+        p.x = fxi(600);
+        p.y = gs.stage.groundY;
+        p.facing = 1;
+
+        Input prev[tf::kMaxPlayers] = {};
+        auto tick = [&](int8_t sx) {
+            Input cur[tf::kMaxPlayers] = {};
+            cur[0] = mk(0, sx);
+            step(gs, cur, prev);
+            std::memcpy(prev, cur, sizeof(cur));
+        };
+        const fx startX = p.x;
+        for (int c = 0; c < cycles; ++c) {
+            const int8_t dir = (c % 2 == 0) ? 99 : -99;
+            tick(0); // release
+            for (int f = 0; f < 6; ++f)
+                tick(dir); // flick and hold briefly
+        }
+        return gs.players[0].x - startX;
+    };
+
+    // Drift must not ACCUMULATE. A one-time offset from the opening dash is fine
+    // and expected; growth with cycle count would mean the dance walks you away.
+    const fx d5 = danceDrift(5);
+    const fx d20 = danceDrift(20);
+    const fx d40 = danceDrift(40);
+
+    check(fx_abs(d5) < fxi(60), "a short dance stays roughly in place");
+    check(fx_abs(d40 - d20) < fxi(8),
+          "drift does NOT accumulate with more cycles (one-time offset only)");
+    check(fx_abs(d40) < fxi(60), "a long dance still holds position");
+}
+
+void testCannotDanceOutOfRun() {
+    section("you cannot dash-dance out of a run");
+
+    using namespace config;
+
+    // Run has no dash re-entry, so reversing requires a brake. This asymmetry is
+    // the entire reason committing to a run is a decision: a dash keeps your
+    // options open, a run trades them for speed.
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.x = fxi(400);
+    p.y = gs.stage.groundY;
+    p.facing = 1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](int8_t sx) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(0, sx);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    tick(0);
+    for (int f = 0; f < 20; ++f)
+        tick(99);
+    check(gs.players[0].state == ActionState::Run, "committed to a run");
+
+    tick(0);
+    tick(-99);
+    check(gs.players[0].state == ActionState::RunBrake,
+          "reversing out of a run requires braking, not an instant dash");
+    check(gs.players[0].state != ActionState::Dash, "cannot re-enter a dash directly from a run");
+}
+
+void testTurnaroundCostsFrames() {
+    section("turning around is a timed commitment");
+
+    using namespace config;
+    const auto &G = kFighters[CHAR_SCOUT].ground;
+
+    // Ground reversal used to flip `facing` for free in a single frame, which
+    // removed the risk from committing to a direction. Turn frames restore it.
+    check(G.turnFrames > 0, "standing turn costs frames");
+    check(G.dashTurnFrames > 0, "dash reversal costs frames");
+    check(G.dashTurnFrames < G.turnFrames,
+          "reversing out of a dash is quicker than a standing turn");
+
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.x = fxi(500);
+    p.y = gs.stage.groundY;
+    p.facing = 1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](int8_t sx) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(0, sx);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    tick(0);
+    for (int f = 0; f < 4; ++f)
+        tick(99); // dashing right
+    check(gs.players[0].facing == 1, "facing right");
+
+    tick(0);
+    tick(-99); // flick left
+    check(gs.players[0].state == ActionState::Turn, "entered a turn");
+    checkEq(gs.players[0].facing, -1, "facing flips immediately");
+    check(gs.players[0].groundActionFrames > 0, "turn frames are latched");
+}
+
+void testWalkAccelerates() {
+    section("walking ramps up instead of snapping");
+
+    using namespace config;
+    const auto &G = kFighters[CHAR_SCOUT].ground;
+
+    // Instant-on movement is the clearest sign a ground game is shallow. Walk now
+    // starts at walkInitVel and accelerates toward walkSpeed.
+    check(G.walkInitVel < G.walkSpeed, "initial walk velocity is below top speed");
+    check(G.walkAccel > 0, "walk has an acceleration");
+
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.x = fxi(500);
+    p.y = gs.stage.groundY;
+    p.facing = 1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](int8_t sx) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(0, sx);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    // A gentle deflection (below the dash threshold) walks.
+    const int8_t soft = static_cast<int8_t>(kStick.deadzone + 6);
+    tick(0);
+    tick(soft);
+    const fx firstFrame = gs.players[0].selfVelX;
+    check(firstFrame > 0, "walking moves you");
+    check(firstFrame < G.walkSpeed, "does NOT snap to top walk speed instantly");
+
+    for (int f = 0; f < 20; ++f)
+        tick(soft);
+    check(fx_abs(gs.players[0].selfVelX) <= G.walkSpeed + fx_ratio(1, 100),
+          "walk velocity converges on the cap");
+    check(gs.players[0].selfVelX > firstFrame, "velocity increased over time");
+}
+
+void testRunAccelerationTapers() {
+    section("run acceleration tapers toward top speed");
+
+    using namespace config;
+
+    // From ftCo_Run_Phys: acceleration scales by (1 - vel/target), so it is strong
+    // at low speed and eases into the cap. Without the taper a run reaches top
+    // speed abruptly and reads as a switch rather than a build-up.
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.x = fxi(300);
+    p.y = gs.stage.groundY;
+    p.facing = 1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&]() {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(0, 99);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+    {
+        Input cur[tf::kMaxPlayers] = {};
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    }
+
+    // Get into a run, then sample acceleration early vs late.
+    for (int f = 0; f < 14; ++f)
+        tick();
+    check(gs.players[0].state == ActionState::Run, "running");
+
+    const fx v1 = gs.players[0].selfVelX;
+    tick();
+    const fx earlyDelta = gs.players[0].selfVelX - v1;
+
+    for (int f = 0; f < 20; ++f)
+        tick();
+    const fx v2 = gs.players[0].selfVelX;
+    tick();
+    const fx lateDelta = gs.players[0].selfVelX - v2;
+
+    check(earlyDelta >= 0, "accelerating early in the run");
+    check(lateDelta <= earlyDelta, "acceleration tapers as top speed is approached");
+}
+
+void testGroundMoveIsPerCharacter() {
+    section("ground movement values are per-character");
+
+    using namespace config;
+    const auto &scout = kFighters[CHAR_SCOUT].ground;
+    const auto &bruiser = kFighters[CHAR_BRUISER].ground;
+
+    // REGRESSION: Bruiser's GroundMove used a POSITIONAL initializer. Adding six
+    // fields before dashSpeed silently shifted every value into the wrong slot --
+    // walk speed landed in walkInitVel, dash speed in walkAccel, and so on. The
+    // roster now uses designated initializers so field order cannot break it.
+    check(bruiser.walkSpeed < scout.walkSpeed, "bruiser walks slower");
+    check(bruiser.dashSpeed < scout.dashSpeed, "bruiser dashes slower");
+    check(bruiser.dashInitVel < scout.dashInitVel, "bruiser has a weaker dash burst");
+    check(bruiser.turnFrames > scout.turnFrames, "bruiser turns slower");
+    check(bruiser.dashFrames > scout.dashFrames, "bruiser has a longer dash window");
+    check(bruiser.friction > scout.friction, "bruiser has more grip");
+
+    // Sanity: values must be plausible, not garbage from a shifted initializer.
+    check(bruiser.walkSpeed > 0 && bruiser.walkSpeed < fxi(10),
+          "bruiser walk speed is in a sane range");
+    check(bruiser.dashSpeed > bruiser.walkSpeed, "bruiser dash is faster than its walk");
+    check(scout.dashSpeed > scout.walkSpeed, "scout dash is faster than its walk");
+
+    // Both characters must reach a run.
+    check(groundStateAfter(99, scout.dashFrames + 4, CHAR_SCOUT) == ActionState::Run,
+          "scout can reach a run");
+    check(groundStateAfter(99, bruiser.dashFrames + 4, CHAR_BRUISER) == ActionState::Run,
+          "bruiser can reach a run");
+}
+
 void testGroundFrictionIsNotIcy() {
     section("ground friction stops you crisply without killing the wavedash");
 
@@ -745,10 +1021,28 @@ void testGroundAttackMatrix() {
     checkEq(attackFrom(false, 0, 99, stale), ATK_TILT_DOWN, "held down -> down tilt");
 
     // Boundary: just inside the window is still a flick, just outside is not.
-    checkEq(attackFrom(false, 99, 0, kSmash.flickWindow - 1), ATK_SMASH_SIDE,
+    //
+    // Uses a MID deflection (past kSmash.deflection but below kStick.hard) so the
+    // flick window is tested in isolation. A full 99 deflection held for a few
+    // frames now enters a DASH, and entering a dash deliberately saturates the
+    // stick timer -- so the later attack would come out of the dash with a stale
+    // timer and read as a tilt. That is correct behaviour (in Melee, attacking out
+    // of a dash is a dash attack, not a side smash), it just makes 99 the wrong
+    // probe for this particular boundary.
+    const int8_t midDeflect = static_cast<int8_t>((kSmash.deflection + kStick.hard) / 2);
+    check(midDeflect >= kSmash.deflection, "probe registers as a direction");
+    check(midDeflect < kStick.hard, "probe is below the dash threshold");
+
+    checkEq(attackFrom(false, midDeflect, 0, kSmash.flickWindow - 1), ATK_SMASH_SIDE,
             "last frame of the flick window still smashes");
-    checkEq(attackFrom(false, 99, 0, kSmash.flickWindow), ATK_TILT_SIDE,
+    checkEq(attackFrom(false, midDeflect, 0, kSmash.flickWindow), ATK_TILT_SIDE,
             "one frame past the window tilts");
+
+    // And the interaction that replaced it: a hard flick WITHOUT attack starts a
+    // dash, so attacking afterwards is no longer a smash. Flick and attack on the
+    // SAME frame still smashes -- asserted above.
+    checkEq(attackFrom(false, 99, 0, 3), ATK_TILT_SIDE,
+            "attacking after a hard flick comes out of the dash, not a smash");
 
     // Below the deflection threshold the stick does not register a direction.
     checkEq(attackFrom(false, static_cast<int8_t>(kSmash.deflection - 5), 0, 0), ATK_JAB,
@@ -2584,6 +2878,13 @@ int main() {
     testJumping();
     testFastFall();
     testWavedashEmerges();
+    testDashCommitsToRun();
+    testDashDanceHoldsPosition();
+    testCannotDanceOutOfRun();
+    testTurnaroundCostsFrames();
+    testWalkAccelerates();
+    testRunAccelerationTapers();
+    testGroundMoveIsPerCharacter();
     testGroundFrictionIsNotIcy();
     testOneAirDodgePerAirtime();
     testHelplessAfterAirDodge();
