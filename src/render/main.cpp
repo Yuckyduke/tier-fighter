@@ -182,6 +182,13 @@ const char* stateName(ActionState s) {
         case ActionState::GetUpRoll:    return "Roll";
         case ActionState::GetUpAttack:  return "GetUpAtk";
         case ActionState::Tech:         return "TECH!";
+        case ActionState::Grabbing:     return "GRAB!";
+        case ActionState::GrabHold:     return "holding";
+        case ActionState::Pummel:       return "pummel";
+        case ActionState::Throwing:     return "THROWING";
+        case ActionState::GrabRelease:  return "released";
+        case ActionState::Grabbed:      return "GRABBED";
+        case ActionState::Thrown:       return "THROWN";
         case ActionState::ShieldOn:     return "shield^";
         case ActionState::Shield:       return "SHIELD";
         case ActionState::ShieldOff:    return "shieldv";
@@ -410,6 +417,13 @@ void drawPlayerHud(const Player& p, int index, int x, int y) {
             row += 18;
         }
     }
+    if (p.grabPartner != kNoAttacker) {
+        std::snprintf(line, sizeof(line), "%s  hold %u",
+                      p.isGrabber ? "GRABBING" : "GRABBED (mash!)",
+                      p.grabHoldFrames);
+        DrawText(line, x, row, 18, Color{255, 170, 255, 255});
+        row += 20;
+    }
     if (p.shieldStunFrames > 0) {
         std::snprintf(line, sizeof(line), "shieldstun %u", p.shieldStunFrames);
         DrawText(line, x, row, 16, Color{255, 200, 120, 255});
@@ -537,6 +551,8 @@ int main() {
                 "LEDGE: fall past the stage edge to grab. Then toward-stage = climb,\n"
                 "  shield = roll, attack = ledge attack, jump = jump, down/away = drop.\n"
                 "TECH: press shield just before hitting the ground in hitstun.\n"
+                "GRAB: hold G + press F. Then flick a direction to throw,\n"
+                "  or press F to pummel. Grabbed? Mash buttons AND stick to escape.\n"
                 "SHIELD: hold G. Blocks damage but drains -- run it out and it BREAKS.\n"
                 "  Out of shield: flick sideways = roll, flick down = spotdodge.\n"
                 "SDI: flick the stick during the hit freeze to shift position.\n"

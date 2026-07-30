@@ -280,6 +280,91 @@ struct GroundEscape {
     int dodgeInvulnFrames= 14;
 };
 
+// --- Grab --------------------------------------------------------------------
+// Mirrors the Catch* family. A grab is a HITBOX with a different element type,
+// tested against grabbable opponents the same way an attack is -- so it reuses the
+// existing attack-resolution path rather than needing new collision code.
+//
+// Entry is shield-held + attack-pressed (Melee's Z is literally that combo).
+//
+// The hold timer is the interesting part: it scales with the victim's DAMAGE, so a
+// worn-down opponent is held far longer. That interacts well with the arena's
+// full-heal-on-KO -- you are hardest to grab-punish right after scoring.
+//
+// Escape is by mashing, with TWO independent drains per frame: any fresh button
+// press, AND any change in stick direction. Both can fire on the same frame, which
+// is why circling the stick is the optimal escape.
+struct Grab {
+    int startupFrames = 6;    // before the grab box is live
+    int activeFrames  = 3;
+    int whiffFrames   = 30;   // total on a miss -- a real punish window
+    fx  reachX        = fxi(38);
+    fx  reachY        = fxi(-16);
+    fx  radius        = fxi(26);
+
+    // Where the victim is held, relative to the grabber. Melee parents the victim's
+    // skeleton to a bone on the grabber; a plain offset is the same mechanic without
+    // the rig.
+    fx  holdOffsetX   = fxi(30);
+    fx  holdOffsetY   = 0;
+
+    // Hold duration: base + damage * scale, clamped. Mirrors their
+    // `percent * coefficient` dominant term, minus the handicap and stock-placement
+    // terms which presuppose systems we do not have.
+    int holdBaseFrames  = 40;
+    fx  holdPerDamage   = fx_ratio(6, 10);
+    int holdMaxFrames   = 240;
+
+    // Mash drains, matching their two independent inputs per frame.
+    fx  drainPerFrame   = fxi(1);
+    fx  drainPerMash    = fxi(5);
+
+    // Pummel: a small hit that does NOT reset the hold timer, so pummelling trades
+    // damage against giving the victim more time to mash out.
+    int pummelFrames    = 16;
+    fx  pummelDamage    = fxi(2);
+
+    // Release. Both players get pushed apart so a broken grab resets neutral.
+    int releaseFrames   = 20;
+    fx  releasePushX    = fx_ratio(12, 10);
+
+    // Grab breaks if the victim ends up too far away -- their x34C/x350 checks.
+    fx  maxHoldDistX    = fxi(52);
+    fx  maxHoldDistY    = fxi(44);
+};
+
+// --- Throws ------------------------------------------------------------------
+// Mirrors Throw*/Thrown*. Four directions, chosen by a RISING-EDGE stick flick
+// after the grab connects -- you cannot hold a direction into a grab.
+//
+// Two findings from the decomp that shape this:
+//
+//   1. Throws are GUARANTEED once started. The escape budget is explicitly zeroed
+//      on throw entry; the mash machinery still exists in their code but is dead.
+//      So all escaping happens during the hold, never during the throw.
+//
+//   2. Throw knockback substitutes a GLOBAL weight constant for the victim's own
+//      weight. Every normal attack divides by victim weight; throws deliberately do
+//      not. Victim weight instead scales the throw's DURATION -- so a heavy
+//      character is not harder to throw, just slower to throw. Easy to get exactly
+//      backwards.
+struct Throw {
+    int windupFrames = 8;     // before the victim is released
+    int totalFrames  = 26;
+
+    // Substituted for victim weight in the knockback formula (their x10C).
+    fx  weightConstant = fxi(100);
+    // Duration scales with victim weight instead (their x37C).
+    fx  weightDurationScale = fx_ratio(6, 1000);
+
+    // Per-direction damage, base knockback, growth, and angle. Down-throw uses a
+    // steep angle and forces a tumble launch, as theirs does.
+    fx  damageF = fxi(9),  damageB = fxi(11), damageU = fxi(8),  damageD = fxi(7);
+    fx  baseKB  = fxi(14);
+    fx  growthF = fxi(72), growthB = fxi(84), growthU = fxi(78), growthD = fxi(56);
+    int angleF  = 42, angleB = 138, angleU = 88, angleD = 72;
+};
+
 // --- SDI (smash directional influence) --------------------------------------
 // Flick the stick during hitlag and you shift POSITION -- not velocity.
 //
@@ -795,6 +880,7 @@ struct Fighter {
     Ledge      ledge;
     Shield     shield;
     GroundEscape escape;
+    Grab       grab;
 
     // Per-character attacks. A heavy character's smash should not share numbers
     // with a fast one, so the whole table belongs to the fighter -- this pointer
@@ -894,6 +980,7 @@ constexpr Fighter kFighters[CHAR_COUNT] = {
         Ledge{},
         Shield{},
         GroundEscape{},
+        Grab{},
         kScoutAttacks,
     },
 
@@ -1006,6 +1093,29 @@ constexpr Fighter kFighters[CHAR_COUNT] = {
             .dodgeInvulnStart = 3,
             .dodgeInvulnFrames = 16,
         },
+        // Slower to start and to recover, but longer reach and a longer hold.
+        // Same durability-for-options trade as the rest of this character.
+        Grab{
+            .startupFrames = 8,
+            .activeFrames = 3,
+            .whiffFrames = 38,
+            .reachX = fxi(44),
+            .reachY = fxi(-18),
+            .radius = fxi(30),
+            .holdOffsetX = fxi(36),
+            .holdOffsetY = 0,
+            .holdBaseFrames = 52,
+            .holdPerDamage = fx_ratio(7, 10),
+            .holdMaxFrames = 260,
+            .drainPerFrame = fxi(1),
+            .drainPerMash = fxi(5),
+            .pummelFrames = 20,
+            .pummelDamage = fxi(3),
+            .releaseFrames = 24,
+            .releasePushX = fx_ratio(10, 10),
+            .maxHoldDistX = fxi(58),
+            .maxHoldDistY = fxi(48),
+        },
         kBruiserAttacks,
     },
 };
@@ -1018,6 +1128,7 @@ constexpr Hitstun              kHitstun{};
 constexpr Hitlag               kHitlag{};
 constexpr SDI                  kSDI{};
 constexpr ShieldBreak          kShieldBreak{};
+constexpr Throw                kThrow{};
 constexpr DirectionalInfluence kDI{};
 constexpr Respawn              kRespawn{};
 constexpr StickThresholds      kStick{};

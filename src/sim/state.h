@@ -62,6 +62,23 @@ enum class ActionState : uint8_t {
     // momentum and keeps it. That asymmetry is deliberate.
     RollForward, RollBack, SpotDodge,
 
+    // --- Grab family ---------------------------------------------------------
+    // Grabber side. Melee's CatchPull is a separate transition state; we go
+    // straight to the hold, since the pull-in is animation rather than mechanic.
+    Grabbing,      // the attempt: startup, active window, whiff recovery
+    GrabHold,      // holding the victim, waiting for a throw or an escape
+    Pummel,        // a small hit that does NOT reset the hold timer
+    GrabRelease,   // the grab broke or was escaped
+
+    // Victim side. Their position is DRIVEN by the grabber, so these states have
+    // no physics of their own -- see the grab resolution pass in sim.cpp.
+    Grabbed,       // held; mash to escape
+    Thrown,        // being thrown; guaranteed, no escape once it starts
+
+    // Throwing. Direction is a parameter rather than four states, since only the
+    // knockback vector and duration differ.
+    Throwing,
+
     // Helpless fall after an air dodge. Mirrors the decomp's FallSpecial: a
     // distinct state whose input handling has NO air-dodge entry, which is how
     // Melee limits you to one dodge per airborne period without needing a counter.
@@ -189,6 +206,21 @@ struct Player {
     // distance is interpolated rather than integrated.
     fx      rollStartX = 0;
     int8_t  escapeDir = 0;
+
+    // --- Grab ----------------------------------------------------------------
+    // Who this player is grabbing, or being grabbed by. kNoAttacker for neither.
+    // Two-way: both sides point at each other, which is what lets the resolution
+    // pass find the pair from either end.
+    uint8_t grabPartner = kNoAttacker;
+    bool    isGrabber = false;
+
+    // Hold timer, counted DOWN. Set from the victim's damage at grab time, so a
+    // worn-down opponent is held longer.
+    uint16_t grabHoldFrames = 0;
+
+    // Which throw is coming out: 0 none, 1 forward, 2 back, 3 up, 4 down.
+    uint8_t throwDir = 0;
+    uint8_t throwFrames = 0;
 
     // --- Hitlag --------------------------------------------------------------
     // Frames of contact freeze remaining. While non-zero the player does not

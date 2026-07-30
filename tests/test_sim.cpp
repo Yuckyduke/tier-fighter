@@ -2522,6 +2522,409 @@ GameState shieldedPlayer(int holdFrames, uint8_t charId) {
     return gs;
 }
 
+// --- Grab and throws --------------------------------------------------------
+
+// Two players facing each other at `gap` apart, ready to grab.
+GameState grabSetup(fx gap, uint8_t grabberChar) {
+    GameState gs = makeMatch(2);
+    gs.players[0].charId = grabberChar;
+    gs.players[0].x = fxi(500);
+    gs.players[0].y = gs.stage.groundY;
+    gs.players[0].facing = 1;
+    gs.players[1].x = fxi(500) + gap;
+    gs.players[1].y = gs.stage.groundY;
+    gs.players[1].facing = -1;
+    return gs;
+}
+
+// Run until the grab connects (or the attempt expires). Returns frames elapsed, or
+// -1 if it never connected.
+int runToGrabHold(GameState& gs, Input* prev, int maxFrames = 24) {
+    Input cur[tf::kMaxPlayers] = {};
+    cur[0] = mk(BtnShield | BtnAttack);
+    step(gs, cur, prev);
+    std::memcpy(prev, cur, sizeof(cur));
+
+    for (int f = 0; f < maxFrames; ++f) {
+        Input c[tf::kMaxPlayers] = {};
+        c[0] = mk(BtnShield);
+        step(gs, c, prev);
+        std::memcpy(prev, c, sizeof(c));
+        if (gs.players[0].state == ActionState::GrabHold) return f;
+    }
+    return -1;
+}
+
+void testGrabConnects() {
+    section("grab connects and holds the victim");
+
+    using namespace config;
+    const auto& G = kFighters[CHAR_SCOUT].grab;
+
+    GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+    Input prev[tf::kMaxPlayers] = {};
+    const int frames = runToGrabHold(gs, prev);
+
+    check(frames >= 0, "grab connected");
+    check(gs.players[0].state == ActionState::GrabHold, "grabber is holding");
+    check(gs.players[1].state == ActionState::Grabbed, "victim is grabbed");
+
+    // Two-way references, which is what lets the resolution pass find the pair
+    // from either end.
+    checkEq(gs.players[0].grabPartner, 1, "grabber points at the victim");
+    checkEq(gs.players[1].grabPartner, 0, "victim points at the grabber");
+    check(gs.players[0].isGrabber, "grabber is flagged as such");
+    check(!gs.players[1].isGrabber, "victim is not flagged as grabber");
+
+    // The victim's position is DRIVEN by the grabber, at the hold offset.
+    const fx expectedX = gs.players[0].x + G.holdOffsetX * gs.players[0].facing;
+    checkEq(gs.players[1].x, expectedX, "victim is held at the grab offset");
+    checkEq(gs.players[1].facing, -gs.players[0].facing, "victim faces their captor");
+    checkEq(gs.players[1].selfVelX, 0, "held victim has no velocity of their own");
+
+    // Grab is ground-only and cannot re-grab someone already held.
+    GameState air = grabSetup(fxi(30), CHAR_SCOUT);
+    air.players[1].y = air.stage.groundY - fxi(80);
+    air.players[1].state = ActionState::Airborne;
+    Input aprev[tf::kMaxPlayers] = {};
+    check(runToGrabHold(air, aprev) < 0, "cannot grab an airborne opponent");
+}
+
+void testGrabWhiffIsPunishable() {
+    section("whiffing a grab is a real punish window");
+
+    using namespace config;
+    const auto& G = kFighters[CHAR_SCOUT].grab;
+
+    // Out of range: the attempt must play out its full recovery. That cost is what
+    // stops grab being a free answer to shielding.
+    GameState gs = grabSetup(fxi(300), CHAR_SCOUT);
+    Input prev[tf::kMaxPlayers] = {};
+    check(runToGrabHold(gs, prev, G.whiffFrames + 4) < 0, "grab whiffed");
+
+    GameState gs2 = grabSetup(fxi(300), CHAR_SCOUT);
+    Input p2[tf::kMaxPlayers] = {};
+    Input cur[tf::kMaxPlayers] = {};
+    cur[0] = mk(BtnShield | BtnAttack);
+    step(gs2, cur, p2);
+    std::memcpy(p2, cur, sizeof(cur));
+
+    int recovery = 0;
+    for (int f = 0; f < 120; ++f) {
+        Input c[tf::kMaxPlayers] = {};
+        c[0] = mk(BtnShield);
+        step(gs2, c, p2);
+        std::memcpy(p2, c, sizeof(c));
+        ++recovery;
+        if (gs2.players[0].state != ActionState::Grabbing) break;
+    }
+    check(recovery >= G.whiffFrames - 2,
+          "whiff recovery lasts roughly the configured window");
+    check(G.whiffFrames > G.startupFrames + G.activeFrames,
+          "recovery is longer than the active window");
+}
+
+void testGrabHoldScalesWithDamage() {
+    section("grab hold duration scales with victim damage");
+
+    using namespace config;
+
+    // A worn-down opponent is held far longer. This interacts with the arena's
+    // full-heal-on-KO: you are hardest to grab-punish right after scoring.
+    auto holdFor = [](fx damage) {
+        GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+        gs.players[1].damage = damage;
+        Input prev[tf::kMaxPlayers] = {};
+        if (runToGrabHold(gs, prev) < 0) return static_cast<uint16_t>(0);
+        return gs.players[0].grabHoldFrames;
+    };
+
+    const uint16_t fresh = holdFor(0);
+    const uint16_t worn = holdFor(fxi(50));
+    const uint16_t battered = holdFor(fxi(120));
+
+    check(fresh > 0, "a fresh opponent is held for a base duration");
+    check(worn > fresh, "50%% damage is held longer than 0%%");
+    check(battered > worn, "120%% damage is held longer still");
+    check(battered <= kFighters[CHAR_SCOUT].grab.holdMaxFrames,
+          "hold duration respects its cap");
+}
+
+void testGrabMashEscape() {
+    section("mashing escapes a grab faster");
+
+    using namespace config;
+
+    // Two INDEPENDENT drains per frame in the original: any fresh button press, AND
+    // any change in stick direction. Both can fire together, which is why circling
+    // the stick is the optimal escape.
+    auto framesHeld = [](int mode) {
+        GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+        Input prev[tf::kMaxPlayers] = {};
+        if (runToGrabHold(gs, prev) < 0) return 999;
+
+        int held = 0;
+        while (gs.players[1].state == ActionState::Grabbed && held < 500) {
+            Input c[tf::kMaxPlayers] = {};
+            c[0] = mk(BtnShield);
+            if (mode == 1 && held % 2 == 0) c[1] = mk(BtnAttack);
+            if (mode == 2) {
+                c[1] = mk(held % 2 == 0 ? BtnAttack : 0,
+                          static_cast<int8_t>(held % 4 < 2 ? 99 : -99));
+            }
+            step(gs, c, prev);
+            std::memcpy(prev, c, sizeof(c));
+            ++held;
+        }
+        return held;
+    };
+
+    const int passive = framesHeld(0);
+    const int buttons = framesHeld(1);
+    const int both = framesHeld(2);
+
+    check(passive > 0 && passive < 500, "a passive victim escapes eventually");
+    check(buttons < passive, "mashing buttons escapes faster than waiting");
+    check(both < buttons, "buttons AND stick escapes faster than buttons alone");
+}
+
+void testThrowDirections() {
+    section("four throws with distinct trajectories");
+
+    using namespace config;
+
+    // Direction is a RISING-EDGE flick after the grab connects -- you cannot hold a
+    // direction into a grab. Peak displacement is measured rather than the endpoint:
+    // sampling after the arc completes reads as no movement at all.
+    struct Result { int dmg; fx peakUp; fx furthestX; uint8_t dir; };
+    auto throwWith = [](int8_t sx, int8_t sy) {
+        GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+        Input prev[tf::kMaxPlayers] = {};
+        Result r{0, 0, 0, 0};
+        if (runToGrabHold(gs, prev) < 0) return r;
+
+        auto tick = [&](int8_t x, int8_t y) {
+            Input c[tf::kMaxPlayers] = {};
+            c[0] = mk(BtnShield, x, y);
+            step(gs, c, prev);
+            std::memcpy(prev, c, sizeof(c));
+        };
+        tick(0, 0);                       // neutral, so the flick is a fresh crossing
+        const fx x0 = gs.players[1].x;
+        const fx y0 = gs.players[1].y;
+        tick(sx, sy);
+        r.dir = gs.players[0].throwDir;
+
+        for (int f = 0; f < 60; ++f) {
+            tick(0, 0);
+            const fx up = y0 - gs.players[1].y;
+            if (up > r.peakUp) r.peakUp = up;
+            const fx dx = gs.players[1].x - x0;
+            if (fx_abs(dx) > fx_abs(r.furthestX)) r.furthestX = dx;
+        }
+        r.dmg = fx_to_int(gs.players[1].damage);
+        return r;
+    };
+
+    const Result fwd = throwWith(99, 0);
+    const Result back = throwWith(-99, 0);
+    const Result up = throwWith(0, -99);
+    const Result down = throwWith(0, 99);
+
+    checkEq(fwd.dir, 1, "forward flick selects the forward throw");
+    checkEq(back.dir, 2, "backward flick selects the back throw");
+    checkEq(up.dir, 3, "up flick selects the up throw");
+    checkEq(down.dir, 4, "down flick selects the down throw");
+
+    check(fwd.dmg > 0 && back.dmg > 0 && up.dmg > 0 && down.dmg > 0,
+          "every throw deals damage");
+
+    // Distinct trajectories -- otherwise the four directions are cosmetic.
+    check(fwd.furthestX > 0, "forward throw sends them forward");
+    check(back.furthestX < 0, "back throw sends them backward");
+    check(up.peakUp > fwd.peakUp, "up throw goes higher than forward");
+    check(fx_abs(up.furthestX) < fx_abs(fwd.furthestX),
+          "up throw is more vertical than forward");
+}
+
+void testThrowIsGuaranteed() {
+    section("throws cannot be escaped once started");
+
+    using namespace config;
+
+    // Their escape budget is explicitly zeroed on throw entry -- the mash machinery
+    // still exists in the original but is dead code. All escaping happens during the
+    // hold, never during the throw.
+    GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+    Input prev[tf::kMaxPlayers] = {};
+    check(runToGrabHold(gs, prev) >= 0, "grab connected");
+
+    auto tick = [&](int8_t sx, uint16_t victimBtn, int8_t victimStick) {
+        Input c[tf::kMaxPlayers] = {};
+        c[0] = mk(BtnShield, sx);
+        c[1] = mk(victimBtn, victimStick);
+        step(gs, c, prev);
+        std::memcpy(prev, c, sizeof(c));
+    };
+
+    tick(0, 0, 0);
+    tick(99, 0, 0);      // forward throw
+    check(gs.players[0].state == ActionState::Throwing, "throw started");
+    check(gs.players[1].state == ActionState::Thrown, "victim is being thrown");
+    checkEq(gs.players[1].grabHoldFrames, 0,
+            "the escape budget is ZEROED once a throw starts");
+
+    // The victim mashes as hard as possible -- it must not save them.
+    //
+    // Run past the windup: the release happens mid-animation at windupFrames, so a
+    // shorter window samples before any damage has been applied and reads as a
+    // failure when nothing is wrong.
+    bool stillThrown = false;
+    for (int f = 0; f < kThrow.windupFrames + 4; ++f) {
+        tick(0, (f % 2 == 0) ? BtnAttack : BtnJump,
+             static_cast<int8_t>(f % 4 < 2 ? 99 : -99));
+        if (gs.players[1].state == ActionState::Thrown) stillThrown = true;
+    }
+    check(stillThrown, "mashing does not escape a throw in progress");
+    check(fx_to_int(gs.players[1].damage) > 0, "the throw landed its damage");
+    check(gs.players[1].state != ActionState::Thrown,
+          "the victim is released once the windup completes");
+}
+
+void testPummelDoesNotResetHold() {
+    section("pummelling trades damage for escape time");
+
+    using namespace config;
+
+    // A pummel deals damage but does NOT reset the hold timer, so pummelling is a
+    // real decision: more damage, but the victim gets closer to escaping.
+    GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+    Input prev[tf::kMaxPlayers] = {};
+    check(runToGrabHold(gs, prev) >= 0, "grab connected");
+
+    const uint16_t holdBefore = gs.players[1].grabHoldFrames;
+    const fx dmgBefore = gs.players[1].damage;
+
+    Input cur[tf::kMaxPlayers] = {};
+    cur[0] = mk(BtnShield | BtnAttack);
+    step(gs, cur, prev);
+    std::memcpy(prev, cur, sizeof(cur));
+    check(gs.players[0].state == ActionState::Pummel, "attack in hold gives a pummel");
+
+    for (int f = 0; f < kFighters[CHAR_SCOUT].grab.pummelFrames + 2; ++f) {
+        Input c[tf::kMaxPlayers] = {};
+        c[0] = mk(BtnShield);
+        step(gs, c, prev);
+        std::memcpy(prev, c, sizeof(c));
+    }
+    check(gs.players[1].damage > dmgBefore, "pummel deals damage");
+    check(gs.players[1].grabHoldFrames < holdBefore,
+          "the hold timer keeps draining through a pummel");
+}
+
+void testGrabReleaseOnDistanceAndKO() {
+    section("grabs release cleanly on distance and on KO");
+
+    using namespace config;
+
+    // A KO'd player must not leave their partner holding a corpse -- a dangling
+    // partner index would desync.
+    GameState gs = grabSetup(fxi(30), CHAR_SCOUT);
+    Input prev[tf::kMaxPlayers] = {};
+    check(runToGrabHold(gs, prev) >= 0, "grab connected");
+
+    // Kill the victim outright.
+    gs.players[1].x = gs.stage.blastRight + fxi(20);
+    Input cur[tf::kMaxPlayers] = {};
+    cur[0] = mk(BtnShield);
+    step(gs, cur, prev);
+    std::memcpy(prev, cur, sizeof(cur));
+
+    checkEq(gs.players[0].grabPartner, kNoAttacker,
+            "the grabber's partner reference is cleared on a KO");
+    check(!gs.players[0].isGrabber, "grabber flag cleared");
+    check(gs.players[0].state != ActionState::GrabHold,
+          "grabber is no longer holding");
+
+    // Releasing shield lets the victim go voluntarily, pushing both apart.
+    GameState rel = grabSetup(fxi(30), CHAR_SCOUT);
+    Input rprev[tf::kMaxPlayers] = {};
+    check(runToGrabHold(rel, rprev) >= 0, "second grab connected");
+
+    Input none[tf::kMaxPlayers] = {};
+    step(rel, none, rprev);
+    std::memcpy(rprev, none, sizeof(none));
+    check(rel.players[0].state == ActionState::GrabRelease ||
+          rel.players[0].state == ActionState::Idle,
+          "releasing shield ends the grab");
+    checkEq(rel.players[0].grabPartner, kNoAttacker, "references cleared on release");
+    checkEq(rel.players[1].grabPartner, kNoAttacker, "victim reference cleared too");
+}
+
+void testGrabIsPerCharacter() {
+    section("grab values are per-character");
+
+    using namespace config;
+    const auto& sg = kFighters[CHAR_SCOUT].grab;
+    const auto& bg = kFighters[CHAR_BRUISER].grab;
+
+    check(bg.startupFrames > sg.startupFrames, "bruiser grabs slower");
+    check(bg.reachX > sg.reachX, "bruiser reaches further");
+    check(bg.whiffFrames > sg.whiffFrames, "bruiser is punished harder for whiffing");
+    check(bg.holdBaseFrames > sg.holdBaseFrames, "bruiser holds longer");
+
+    // Both characters must actually be able to grab.
+    GameState sgs = grabSetup(fxi(30), CHAR_SCOUT);
+    Input sp[tf::kMaxPlayers] = {};
+    check(runToGrabHold(sgs, sp) >= 0, "scout can grab");
+
+    GameState bgs = grabSetup(fxi(30), CHAR_BRUISER);
+    Input bp[tf::kMaxPlayers] = {};
+    check(runToGrabHold(bgs, bp, 30) >= 0, "bruiser can grab");
+}
+
+void testGrabPairResolutionIsOrderIndependent() {
+    section("grab pair resolution does not depend on player index");
+
+    using namespace config;
+
+    // The resolution pass runs AFTER the per-player loop precisely so a victim in a
+    // lower slot than their grabber is not positioned from a stale frame. We already
+    // hit this class of bug with the hitlag countdown.
+    auto holdOffset = [](int grabberSlot, int victimSlot) {
+        GameState gs = makeMatch(2);
+        gs.players[grabberSlot].x = fxi(500);
+        gs.players[grabberSlot].y = gs.stage.groundY;
+        gs.players[grabberSlot].facing = 1;
+        gs.players[victimSlot].x = fxi(530);
+        gs.players[victimSlot].y = gs.stage.groundY;
+        gs.players[victimSlot].facing = -1;
+
+        Input prev[tf::kMaxPlayers] = {};
+        Input cur[tf::kMaxPlayers] = {};
+        cur[grabberSlot] = mk(BtnShield | BtnAttack);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+
+        for (int f = 0; f < 24; ++f) {
+            Input c[tf::kMaxPlayers] = {};
+            c[grabberSlot] = mk(BtnShield);
+            step(gs, c, prev);
+            std::memcpy(prev, c, sizeof(c));
+            if (gs.players[grabberSlot].state == ActionState::GrabHold) break;
+        }
+        if (gs.players[grabberSlot].state != ActionState::GrabHold) return fxi(-9999);
+        return gs.players[victimSlot].x - gs.players[grabberSlot].x;
+    };
+
+    const fx forward = holdOffset(0, 1);
+    const fx reversed = holdOffset(1, 0);
+    check(forward != fxi(-9999), "P0 grabbing P1 works");
+    check(reversed != fxi(-9999), "P1 grabbing P0 works");
+    checkEq(forward, reversed,
+            "the hold offset is identical regardless of slot order");
+}
+
 void testShieldBlocksDamage() {
     section("shield absorbs hits without taking damage");
 
@@ -3445,6 +3848,16 @@ int main() {
     testWalkOffEdge();
     testJumpNearEdgeLandsNormally();
     testLedgeStatesSurviveWalkOffCheck();
+    testGrabConnects();
+    testGrabWhiffIsPunishable();
+    testGrabHoldScalesWithDamage();
+    testGrabMashEscape();
+    testThrowDirections();
+    testThrowIsGuaranteed();
+    testPummelDoesNotResetHold();
+    testGrabReleaseOnDistanceAndKO();
+    testGrabIsPerCharacter();
+    testGrabPairResolutionIsOrderIndependent();
     testShieldBlocksDamage();
     testShieldHealthFlows();
     testShieldstunUsesLargestHit();

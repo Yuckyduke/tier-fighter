@@ -112,7 +112,14 @@ Ordered by what I'd build first.
 - **Ground escapes (4):** `Escape{F,B,N}` → our `RollForward`, `RollBack`,
   `SpotDodge`. (`EscapeAir` was already the air dodge.)
 
-### 1. Grab + throws — 20 states (phase 2)
+### DONE (phase 2): Grab + throws — 20 states
+
+Collapsed to 7: `Grabbing`, `GrabHold`, `Pummel`, `GrabRelease` (grabber),
+`Grabbed`, `Thrown` (victim), and `Throwing` with direction as a parameter.
+Skipped the `Hi`/`Lw` airborne-victim split, tether grabs, and every
+character-specific capture.
+
+### 1. Smaller mechanics
 - **Grab (7):** `Catch`, `CatchPull`, `CatchDash`, `CatchDashPull`, `CatchWait`,
   `CatchAttack`, `CatchCut`
 - **Throws (13):** `Throw{F,B,Hi,Lw}`, `Thrown{F,B,Hi,Lw}`, `ThrownF{F,B,Hi,Lw}`,
