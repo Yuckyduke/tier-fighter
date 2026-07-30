@@ -274,7 +274,7 @@ Ordered by impact per unit of work:
 | 4 | **Air drift stick-proportional term** | Partial drift instead of all-or-nothing. | **DONE** |
 | 5 | **Turnaround accel exemption** | Snappier reversals. | **DONE** |
 | 6 | **Separate hard velocity ceiling** | Momentum can exceed the drift target. | **DONE** |
-| 7 | **SDI** | Needs hitlag (now present) as its window. | open |
+| 7 | **SDI** | Needs hitlag as its window. | **DONE** |
 | 8 | **Dash / Run split + turn frames** | Unlocks dash-dancing. | **DONE** |
 | 9 | **Walk/dash acceleration** | Movement was instant-on. | **DONE** |
 | 10 | **Crouch + crouch-cancel** (`kb_squat_mul`) | Reduces knockback taken. Was miscalled cosmetic. | open |
@@ -282,6 +282,28 @@ Ordered by impact per unit of work:
 | 12 | **Jump horizontal momentum transfer** | Tunes dash-then-jump. | open |
 | 13 | **`ground_max_horizontal_velocity`** | Ground speed ceiling. | **DONE** |
 | 14 | **`gr_vel` + slope projection** | Only matters once stages have slopes. | open |
+
+### SDI — implemented
+
+`ftCo_Damage_OnEveryHitlag` is the whole mechanic, and five details of it matter:
+
+1. It runs on **every** hitlag frame, not once per hit — a long freeze offers
+   several nudges to anyone who can re-flick fast enough.
+2. The magnitude gate is on the stick **vector** (a squared-length compare), not
+   per-axis, so a diagonal qualifies even when neither axis alone clears the bar.
+3. **Either** axis flicking fresh is enough — an `||`, not an `&&`.
+4. It adds directly to **position**, not velocity. That is why SDI reads as an
+   instant displacement rather than as drift: it bypasses velocity entirely.
+5. Both stick timers **saturate** on success, so one flick buys exactly one nudge.
+   Multi-SDI requires genuine re-flicking, which is what makes it a technique
+   rather than a reward for holding a direction.
+
+Verified: 4 nudges at 2-frame re-flicks, 3 at 3-frame, 2 at 4-frame, 0 with no
+flick — and a stick held from before the hit earns nothing, with position frozen
+through the entire freeze.
+
+We add a per-freeze cap (`maxNudgesPerHitlag`) that they do not have, so a long
+freeze cannot be ridden across the stage by mashing.
 
 ## Measuring coverage
 

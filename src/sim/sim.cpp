@@ -41,6 +41,7 @@ using config::kKnockback;
 using config::Knockback;
 using config::Knockdown;
 using config::kRespawn;
+using config::kSDI;
 using config::kSmash;
 using config::kStick;
 using config::Ledge;
@@ -125,6 +126,40 @@ uint8_t computeHitlag(fx moveDamage, bool crouching) {
     if (f < kHitlag.minFrames) f = kHitlag.minFrames;
     if (f > kHitlag.maxFrames) f = kHitlag.maxFrames;
     return static_cast<uint8_t>(f);
+}
+
+// SDI: shift POSITION during hitlag, mirroring ftCo_Damage_OnEveryHitlag.
+//
+// Runs on every frozen frame, gates on the stick VECTOR magnitude (not per-axis),
+// accepts a fresh flick on EITHER axis, and adds straight to position rather than
+// to velocity -- which is why it reads as an instant displacement instead of drift.
+//
+// On success both stick timers saturate, so one flick buys exactly one nudge.
+// Multi-SDI therefore requires genuinely re-flicking mid-freeze; holding a
+// direction gets you nothing, which is what makes it a technique.
+void applySDI(Player &p, const Input &in) {
+    if (p.sdiNudges >= kSDI.maxNudgesPerHitlag) return;
+
+    const fx sx = fx_ratio(in.stickX, config::kStickRange);
+    const fx sy = fx_ratio(in.stickY, config::kStickRange);
+
+    // Vector magnitude, compared squared to avoid a needless sqrt. A diagonal
+    // qualifies even when neither axis alone clears the threshold.
+    const int64_t magSq = fx_len_sq(sx, sy);
+    if (magSq < fx_sq(kSDI.minStickMag)) return;
+
+    // Either axis freshly crossed is enough.
+    const bool freshX = p.stickHeldX < kSDI.stickWindow;
+    const bool freshY = p.stickHeldY < kSDI.stickWindow;
+    if (!freshX && !freshY) return;
+
+    p.x += fx_mul(sx, kSDI.posScale);
+    p.y += fx_mul(sy, kSDI.posScale);
+    p.sdiNudges++;
+
+    // Saturate BOTH timers: one flick, one nudge.
+    p.stickHeldX = kSmash.stickTimerMax;
+    p.stickHeldY = kSmash.stickTimerMax;
 }
 
 // Decay knockback velocity along its own vector, independent of self-velocity.
@@ -652,6 +687,8 @@ void resolveAttack(GameState &gs, int attackerIdx, const Input inputs[kMaxPlayer
         // consequence of the impact rather than simultaneous with it.
         const uint8_t lag = computeHitlag(dmg, /*crouching*/ false);
         d.hitlagFrames = lag;
+        d.sdiNudges = 0; // fresh budget per hit
+        a.sdiNudges = 0;
         a.hitlagFrames =
             static_cast<uint8_t>(fx_to_int(fx_mul(fxi(lag), kHitlag.attackerFraction)));
 
@@ -827,7 +864,11 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
         // Stick timers ARE still updated, because the freeze is when a defender
         // buffers their escape input -- and it is the window SDI will read.
         if (p.hitlagFrames > 0) {
+            // Stick timers update first so a flick landing THIS frame is visible to
+            // SDI immediately -- the freeze is short, and a one-frame delay would
+            // swallow most attempts.
             updateStickTimers(p, in, prev);
+            applySDI(p, in);
             continue;
         }
 
@@ -1493,6 +1534,7 @@ uint32_t checksum(const GameState &gs) {
         mix(p.bufferedButtons);
         mix(p.hitlagFrames);
         mix(p.groundActionFrames);
+        mix(p.sdiNudges);
         mix(static_cast<uint32_t>(p.ledgeSide));
         mix(p.ledgeHangFrames);
         mix(p.ledgeCooldown);

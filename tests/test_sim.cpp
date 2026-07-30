@@ -2454,6 +2454,193 @@ void testLedgeStatesSurviveWalkOffCheck() {
 
 // --- Hitlag -----------------------------------------------------------------
 
+// --- SDI ---------------------------------------------------------------------
+
+// Land a heavy hit (side smash, long freeze) and feed the DEFENDER a stick pattern
+// during hitlag. `flickPeriod` 0 means never flick; otherwise flick every N frames
+// with neutral in between, which is what re-flicking actually looks like.
+struct SDIResult {
+    bool hit = false;
+    int lag = 0;
+    fx displacement = 0;
+    uint8_t nudges = 0;
+};
+
+SDIResult sdiTrial(int flickPeriod, int8_t flickX, int8_t flickY) {
+    GameState gs = makeMatch(2);
+    gs.players[0].x = fxi(500);
+    gs.players[0].facing = 1;
+    gs.players[1].x = fxi(540);
+    gs.players[1].damage = fxi(60);
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](uint16_t aBtn, int8_t aStick, int8_t dx, int8_t dy) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(aBtn, aStick);
+        cur[1] = mk(0, dx, dy);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    tick(BtnAttack, 99, 0, 0); // flick + attack = side smash, long hitlag
+    for (int f = 0; f < 40 && gs.players[1].hitlagFrames == 0; ++f) {
+        tick(0, 0, 0, 0);
+    }
+
+    SDIResult r;
+    if (gs.players[1].hitlagFrames == 0) return r;
+    r.hit = true;
+    r.lag = gs.players[1].hitlagFrames;
+
+    const fx startX = gs.players[1].x;
+    int f = 0;
+    while (gs.players[1].hitlagFrames > 0 && f < 60) {
+        const bool doFlick = (flickPeriod > 0 && (f % flickPeriod) == 0);
+        tick(0, 0, doFlick ? flickX : 0, doFlick ? flickY : 0);
+        ++f;
+    }
+    r.displacement = gs.players[1].x - startX;
+    r.nudges = gs.players[1].sdiNudges;
+    return r;
+}
+
+void testSDIShiftsPosition() {
+    section("SDI shifts position during hitlag");
+
+    using namespace config;
+
+    // SDI adds directly to POSITION rather than velocity (their
+    // ftCo_Damage_OnEveryHitlag writes cur_pos). That is what makes it read as an
+    // instant displacement instead of drift, and it is only possible because
+    // hitlag freezes the world first.
+    const SDIResult none = sdiTrial(0, 0, 0);
+    const SDIResult flicking = sdiTrial(2, -99, 0);
+
+    check(none.hit && flicking.hit, "both trials connected");
+    checkEq(none.nudges, 0, "no flick -> no SDI");
+    check(flicking.nudges > 0, "re-flicking earns SDI nudges");
+
+    // Flicking away from the launch must reduce net displacement.
+    check(flicking.displacement < none.displacement,
+          "SDI against the launch direction reduces displacement");
+}
+
+void testSDIRequiresReflicking() {
+    section("SDI requires re-flicking, not a held stick");
+
+    using namespace config;
+
+    // One flick buys exactly one nudge -- both stick timers saturate on success.
+    // Multi-SDI therefore demands genuine re-flicking mid-freeze, which is what
+    // makes it a technique rather than a reward for leaning on the stick.
+    const SDIResult fast = sdiTrial(2, -99, 0);
+    const SDIResult slow = sdiTrial(4, -99, 0);
+
+    check(fast.nudges > slow.nudges, "faster re-flicking earns more nudges than slower");
+    check(slow.nudges > 0, "slow re-flicking still earns some");
+
+    // A stick HELD from before the hit must earn nothing: no fresh crossing.
+    GameState gs = makeMatch(2);
+    gs.players[0].x = fxi(500);
+    gs.players[0].facing = 1;
+    gs.players[1].x = fxi(526);
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](uint16_t aBtn) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(aBtn);
+        cur[1] = mk(0, -99); // defender holds left the whole time
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    tick(BtnAttack);
+    for (int f = 0; f < 20 && gs.players[1].hitlagFrames == 0; ++f)
+        tick(0);
+    check(gs.players[1].hitlagFrames > 0, "hit connected");
+
+    const fx frozenX = gs.players[1].x;
+    const uint8_t lag = gs.players[1].hitlagFrames;
+    for (int f = 0; f + 1 < lag; ++f)
+        tick(0);
+
+    checkEq(gs.players[1].sdiNudges, 0, "a stick held from before the hit gets NO SDI");
+    checkEq(gs.players[1].x, frozenX, "position stays frozen without a fresh flick");
+}
+
+void testSDINudgeCap() {
+    section("SDI is capped per freeze");
+
+    using namespace config;
+
+    // Without a cap, a long freeze could be ridden across the stage by mashing.
+    const SDIResult mashed = sdiTrial(1, -99, 0);
+    check(mashed.hit, "connected");
+    check(mashed.nudges <= kSDI.maxNudgesPerHitlag, "nudges never exceed the per-freeze cap");
+
+    // The budget resets per hit, so a second hit offers fresh SDI.
+    check(kSDI.maxNudgesPerHitlag > 0, "SDI is enabled");
+    check(kSDI.maxNudgesPerHitlag < 20, "the cap is a real limit, not a formality");
+}
+
+void testSDIRespectsMagnitudeAndDirection() {
+    section("SDI gates on stick magnitude and works on both axes");
+
+    using namespace config;
+
+    // Below the magnitude threshold, nothing happens -- a light tilt is not SDI.
+    const int8_t weak =
+        static_cast<int8_t>(fx_to_int(fx_mul(kSDI.minStickMag, fxi(config::kStickRange))) - 15);
+    const SDIResult tooWeak = sdiTrial(2, weak, 0);
+    check(tooWeak.hit, "connected");
+    checkEq(tooWeak.nudges, 0, "a sub-threshold deflection earns no SDI");
+
+    // Full deflection works.
+    const SDIResult strong = sdiTrial(2, -99, 0);
+    check(strong.nudges > 0, "full deflection earns SDI");
+
+    // Vertical SDI works too -- the magnitude gate is on the VECTOR, and either
+    // axis flicking fresh qualifies.
+    const SDIResult vertical = sdiTrial(2, 0, -99);
+    check(vertical.nudges > 0, "vertical-only flicks earn SDI");
+
+    // A diagonal qualifies even when neither axis alone clears the threshold,
+    // because the gate is a vector magnitude rather than per-axis.
+    const int8_t diag =
+        static_cast<int8_t>(fx_to_int(fx_mul(kSDI.minStickMag, fxi(config::kStickRange))) - 5);
+    const SDIResult diagonal = sdiTrial(2, static_cast<int8_t>(-diag), diag);
+    check(diagonal.nudges > 0,
+          "a diagonal clears the VECTOR magnitude gate even if each axis is under it");
+}
+
+void testSDIOnlyDuringHitlag() {
+    section("SDI only applies during hitlag");
+
+    using namespace config;
+
+    // Outside a freeze, flicking must move you through normal movement rules --
+    // never by teleporting position. SDI is a hitlag-only mechanic.
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.state = ActionState::Airborne;
+    p.x = fxi(600);
+    p.y = gs.stage.groundY - fxi(400);
+    checkEq(p.hitlagFrames, 0, "not in hitlag");
+
+    Input prev[tf::kMaxPlayers] = {};
+    const fx startX = p.x;
+    for (int f = 0; f < 6; ++f) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(0, (f % 2 == 0) ? -99 : 0); // repeated flicks
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    }
+    checkEq(gs.players[0].sdiNudges, 0, "no SDI nudges outside hitlag");
+
+    // It should still have drifted normally -- flicking is a legitimate air input.
+    check(gs.players[0].x != startX, "normal air drift still applies");
+}
+
 void testHitlagFreezesBothFighters() {
     section("hitlag freezes both fighters on contact");
 
@@ -2924,6 +3111,11 @@ int main() {
     testWalkOffEdge();
     testJumpNearEdgeLandsNormally();
     testLedgeStatesSurviveWalkOffCheck();
+    testSDIShiftsPosition();
+    testSDIRequiresReflicking();
+    testSDINudgeCap();
+    testSDIRespectsMagnitudeAndDirection();
+    testSDIOnlyDuringHitlag();
     testHitlagFreezesBothFighters();
     testHitlagIsOrderIndependent();
     testHitlagScalesWithDamage();

@@ -192,6 +192,38 @@ struct Hitlag {
     fx attackerFraction = kFxOne;
 };
 
+// --- SDI (smash directional influence) --------------------------------------
+// Flick the stick during hitlag and you shift POSITION -- not velocity.
+//
+// Mirrors ftCo_Damage_OnEveryHitlag, and every detail of that function matters:
+//
+//   1. It runs on EVERY hitlag frame, not once per hit. A long freeze offers
+//      multiple nudges if you can re-flick fast enough.
+//   2. The magnitude gate is on the stick VECTOR (squared length), not per-axis,
+//      so a diagonal qualifies even when neither axis alone clears the threshold.
+//   3. EITHER axis flicking fresh is enough (an ||, not an &&) -- a clean
+//      single-axis flick works.
+//   4. It adds directly to position. That is why SDI reads as an instant
+//      displacement rather than as drift: it sidesteps velocity entirely.
+//   5. Both stick timers saturate on success, so one flick buys exactly one nudge.
+//      Multi-SDI requires genuinely re-flicking mid-freeze, which is what makes it
+//      a hard technique rather than a held-direction freebie.
+//
+// Why it exists: hitlag is dead time for the defender otherwise. SDI turns the
+// freeze into a decision -- escape a multi-hit move, adjust where you get launched
+// from, or drift toward the stage. It only works because hitlag exists.
+struct SDI {
+    // Minimum stick magnitude, as a fraction of full deflection.
+    fx minStickMag = fx_ratio(7, 10);
+    // Frames since the stick crossed that still counts as a flick. Shares the same
+    // recency timers as smash-vs-tilt and fast-fall.
+    int stickWindow = 3;
+    // World units shifted per unit of stick deflection.
+    fx posScale = fx_ratio(6, 10);
+    // Cap per hitlag freeze, so a long freeze cannot be ridden across the stage.
+    int maxNudgesPerHitlag = 4;
+};
+
 // --- Knockdown / tech --------------------------------------------------------
 // What happens when a player in hitstun contacts the ground.
 //
@@ -871,6 +903,7 @@ constexpr Fighter kFighter = kFighters[CHAR_SCOUT];
 constexpr Knockback kKnockback{};
 constexpr Hitstun kHitstun{};
 constexpr Hitlag kHitlag{};
+constexpr SDI kSDI{};
 constexpr DirectionalInfluence kDI{};
 constexpr Respawn kRespawn{};
 constexpr StickThresholds kStick{};

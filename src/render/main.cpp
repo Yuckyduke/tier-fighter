@@ -360,6 +360,12 @@ void drawPlayerHud(const Player &p, int index, int x, int y) {
         DrawText(line, x, row, 16, Color{200, 120, 120, 255});
         row += 18;
     }
+    if (p.hitlagFrames > 0) {
+        std::snprintf(line, sizeof(line), "HITLAG %u   sdi %u/%d", p.hitlagFrames, p.sdiNudges,
+                      config::kSDI.maxNudgesPerHitlag);
+        DrawText(line, x, row, 16, Color{255, 240, 140, 255});
+        row += 18;
+    }
     if (p.techWindow > 0) {
         std::snprintf(line, sizeof(line), "TECH window %u", p.techWindow);
         DrawText(line, x, row, 16, Color{140, 255, 200, 255});
@@ -468,6 +474,8 @@ int main() {
                 "LEDGE: fall past the stage edge to grab. Then toward-stage = climb,\n"
                 "  shield = roll, attack = ledge attack, jump = jump, down/away = drop.\n"
                 "TECH: press shield just before hitting the ground in hitstun.\n"
+                "SDI: flick the stick during the hit freeze to shift position.\n"
+                "  Re-flick (neutral between) for more -- holding does nothing.\n"
                 "SMASH: flick the stick + attack together (hold attack to charge).\n"
                 "  Holding a direction first gives a TILT instead.\n"
                 "\n"
