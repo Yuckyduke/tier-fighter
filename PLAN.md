@@ -115,19 +115,89 @@ Not "forgotten" — actively decided against for now.
 
 ## Remaining physics gaps
 
-From the audit in [PHYSICS.md](PHYSICS.md). None of these block playtesting; they're
-depth, not blockers. `tools/coverage.py` tracks the numbers.
+Every divergence found between the Melee decompilation and this codebase. **None of
+these block playtesting** — they're depth, not blockers.
 
-- [ ] Crouch + crouch-cancelling (`kb_squat_mul` — reduces knockback taken)
-- [ ] Tap jump (flick up to jump; no such input exists)
-- [ ] Multi-hit attacks (needs a per-attack hit list, not the current bool)
-- [ ] Attack clank (two attacks colliding cancel)
-- [ ] Wall / ceiling collision, wall tech, wall jump — needs stages with walls
-- [ ] ECB diamond instead of AABB — affects ledge-grab feel
-- [ ] `gr_vel` + slope projection — prerequisite for sloped stages
-- [ ] Rapid jab / jab combos
-- [ ] Angled tilts (their side tilt has five aim variants)
-- [ ] Ledge teeter, edge slip, platform pass-through
+Run `python3 tools/coverage.py` for live numbers. Currently **57%** of knowable
+per-character attributes and **19%** of knowable global constants are covered. Those
+percentages exclude the decomp's unnamed placeholder fields (409 of the 477 globals
+are named `x1F0`, `xA4` and similar) — their purpose is unknown, so they can be
+neither covered nor ruled out, and counting them would make the denominator fiction.
+
+### Mechanics — worth building
+
+Each of these changes how the game plays.
+
+- [ ] **Crouch + crouch-cancelling** — `kb_squat_mul` reduces knockback taken while
+      crouching. A real defensive mechanic; I initially mis-filed crouch as cosmetic.
+- [ ] **Tap jump** — `tap_jump_threshold`, `tap_jump_release_threshold`. Flick the
+      stick up to jump. No such input exists here.
+- [ ] **Multi-hit attacks** — needs a per-attack hit list. The current
+      `attackConnected` bool allows exactly one hit per swing.
+- [ ] **Attack clank** — `ReboundStop`/`Rebound`. Two attacks colliding cancel each
+      other. Removes a whole layer of trades.
+- [ ] **Rapid jab / jab combos** — `jab_2_input_window`, `jab_3_input_window`,
+      `rapid_jab_window`. We have a single jab with no follow-ups.
+- [ ] **Angled tilts** — their side tilt has five aim variants
+      (`AttackS3Hi/HiS/S/LwS/Lw`); we have one.
+- [ ] **Jump horizontal momentum** — 4 attributes including
+      `ground_to_air_jump_momentum_multiplier`, which is how they tune whether
+      dashing then jumping preserves your speed. We carry velocity through unchanged.
+- [ ] **`hit_weight_mul`** — an extra weight term in the knockback formula.
+- [ ] **Walk speed tiers** — `slow_walk_max`, `mid_walk_point`, `fast_walk_min`. We
+      read stick magnitude directly, which is arguably better, but their tiers also
+      gate animation blending.
+
+### Blocked on stage geometry
+
+Can't be built until stages are more than one flat platform.
+
+- [ ] **Wall / ceiling collision** — `StopWall`, `StopCeil`, `FlyReflectWall`,
+      `FlyReflectCeil`
+- [ ] **Wall / ceiling tech** — `PassiveWall`, `PassiveWallJump`, `PassiveCeil`,
+      plus `passivewall_vel_x`, `passiveceil_vel_x`, `passive_wall_vel_y_base`
+- [ ] **Platform pass-through** (`Pass`) — needs soft platforms
+- [ ] **`gr_vel` + slope projection** — they keep ground velocity as a *scalar* and
+      project it onto the floor normal each frame. Prerequisite for sloped stages,
+      and also how surface-specific friction (ice as a floor flag) would work.
+- [ ] **Ledge teeter** (`Ottotto`), **edge slip** (`MissFoot`) — minor polish
+
+### Structural refinements
+
+Approximations that work but diverge from theirs.
+
+- [ ] **ECB diamond instead of AABB** — their body is four points forming a diamond,
+      swept from previous to desired position. We use a swept AABB: same
+      anti-tunnelling property, simpler math. Affects ledge-grab and wall feel.
+- [ ] **Per-bone hurtbox states** — their invulnerability is a hurtbox flag set by
+      animation timeline events, per-bone. Ours is a single countdown per player. The
+      finer resolution would let a roll be invulnerable in the torso while a trailing
+      leg is still hittable.
+- [ ] **Animation-driven roll travel** — they overwrite velocity from the animation's
+      root-bone delta each frame. We interpolate a fixed distance, which produces the
+      same "always covers the same ground" result without a rig.
+- [ ] **Powershield** — `GuardReflect` plus its own timer web and reflect hitboxes.
+      Deliberately deferred, not missed.
+
+### Deliberately not porting
+
+- **The airborne attacker-pushback decay.** The decomp flags this one itself: it
+  zeroes the wrong vector component and clobbers the regular knockback vector,
+  causing a known invisible-ceiling glitch. Faithfully reproducing a bug is not
+  fidelity.
+
+### Out of scope entirely
+
+These account for most of the remaining "uncovered" count, and none will ever be
+built here. Listed so the coverage percentage isn't mistaken for a to-do list.
+
+| Category | Fields | Why never |
+|---|---|---|
+| Items and powerups | ~105 states + attrs | No items in this game |
+| Character-specific grabs, bosses | ~64 | No Bowser, Yoshi, Kirby, Master Hand |
+| Status effects | ~13 | Freeze, bury, sing, disable, metal — all character moves |
+| Cosmetic | ~21 | Model scale, name tag height, trophy scale, camera angles |
+| Presentation | ~5 | Match intro, taunts |
 
 ---
 

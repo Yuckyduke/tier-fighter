@@ -199,12 +199,8 @@ EQUIVALENT = {
     "ledgecooldown": "cooldownFrames",
     "kbmin": "floor",
     "knockbackframedecay": "airDecay",
-    "startshieldhealth": None,          # shield not implemented
     "tapjumpthreshold": None,
     "tapjumpreleasethreshold": None,
-    "sdiminstickmag": None,
-    "sdiposscale": None,
-    "sdistickwindow": None,
     "kbsquatmul": None,
     "kbsmashchargemul": "fullChargeKnockbackMult",
     "hitweightmul": None,
@@ -220,6 +216,31 @@ EQUIVALENT = {
     "landingairhilag": "landingLag",
     "landingairlwlag": "landingLag",
     "unkhitlagframes": "maxFrames",     # x194_unkHitLagFrames -> Hitlag::maxFrames
+
+    # --- Closed by the dash/run split -------------------------------------
+    "dashinitialvelocity": "dashInitVel",
+    "dashrunaccelerationa": "dashAccel",
+    "dashrunaccelerationb": "runAccel",
+    "maxrunbrakeframes": "runBrakeFrames",
+    "framestochangedirectiononstandingturn": "turnFrames",
+    "groundmaxhorizontalvelocity": "maxHorizontal",
+    "walkinitvel": "walkInitVel",
+    "walkaccel": "walkAccel",
+
+    # --- Closed by shield / escapes ---------------------------------------
+    "initialshieldsize": "maxHealth",   # we size the bubble from health directly
+    "shieldbreakinitialvelocity": "launchVelY",
+    "startshieldhealth": "maxHealth",
+    "unkshieldhealth": "dizzyBase",
+
+    # --- Closed by SDI -----------------------------------------------------
+    "sdiminstickmag": "minStickMag",
+    "sdistickwindow": "stickWindow",
+    "sdiposscale": "posScale",
+
+    # --- Closed by grab / throws ------------------------------------------
+    "grabtimerdecrement": "drainPerFrame",
+    "weightindependentthrowsmask": "weightDurationScale",
 }
 
 
