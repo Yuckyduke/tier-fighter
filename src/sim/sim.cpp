@@ -45,6 +45,7 @@ using config::kSDI;
 using config::kShieldBreak;
 using config::kSmash;
 using config::kStick;
+using config::kThrow;
 using config::Ledge;
 
 // Per-player character lookup. EVERY character constant in the simulation is read
@@ -230,6 +231,226 @@ void applyGroundFriction(Player &p) {
                             ? fx_mul(F.ground.friction, F.ground.fastMultiplier)
                             : F.ground.friction;
     p.selfVelX = fx_decay(p.selfVelX, friction);
+}
+
+// --- Grab ------------------------------------------------------------------
+
+// Grab hold duration, from the VICTIM's damage. A worn-down opponent is held far
+// longer, which interacts with the arena's full-heal-on-KO: you are hardest to
+// grab-punish right after scoring.
+uint16_t computeGrabHold(const Player &victim, const config::Grab &G) {
+    int32_t frames = G.holdBaseFrames + fx_to_int(fx_mul(victim.damage, G.holdPerDamage));
+    if (frames > G.holdMaxFrames) frames = G.holdMaxFrames;
+    if (frames < 1) frames = 1;
+    return static_cast<uint16_t>(frames);
+}
+
+// Link a grabber and victim. Two-way references, so the resolution pass can find
+// the pair from either end.
+void linkGrab(GameState &gs, int grabberIdx, int victimIdx) {
+    Player &g = gs.players[grabberIdx];
+    Player &v = gs.players[victimIdx];
+    const config::Grab &G = fighterOf(g).grab;
+
+    g.grabPartner = static_cast<uint8_t>(victimIdx);
+    g.isGrabber = true;
+    g.grabHoldFrames = computeGrabHold(v, G);
+    g.attackId = ATK_NONE;
+    enterState(g, ActionState::GrabHold);
+
+    v.grabPartner = static_cast<uint8_t>(grabberIdx);
+    v.isGrabber = false;
+    v.grabHoldFrames = g.grabHoldFrames;
+    v.selfVelX = 0;
+    v.selfVelY = 0;
+    v.kbVelX = 0;
+    v.kbVelY = 0;
+    v.hitstunFrames = 0;
+    v.attackId = ATK_NONE;
+    v.throwDir = 0;
+    enterState(v, ActionState::Grabbed);
+}
+
+// Sever a grab, pushing both players apart so a break resets neutral.
+void breakGrab(GameState &gs, int idx) {
+    Player &p = gs.players[idx];
+    if (p.grabPartner >= kMaxPlayers) return;
+
+    Player &other = gs.players[p.grabPartner];
+    const Player &grabber = p.isGrabber ? p : other;
+    const config::Grab &G = fighterOf(grabber).grab;
+
+    const int8_t gFacing = grabber.facing;
+    Player &gp = p.isGrabber ? p : other;
+    Player &vp = p.isGrabber ? other : p;
+
+    gp.selfVelX = -G.releasePushX * gFacing;
+    vp.selfVelX = G.releasePushX * gFacing;
+
+    Player *pair[2] = {&gp, &vp};
+    for (Player *q : pair) {
+        q->grabPartner = kNoAttacker;
+        q->isGrabber = false;
+        q->grabHoldFrames = 0;
+        q->throwDir = 0;
+        q->throwFrames = 0;
+        q->groundActionFrames = static_cast<uint8_t>(G.releaseFrames);
+    }
+    enterState(gp, ActionState::GrabRelease);
+    enterState(vp, ActionState::GrabRelease);
+}
+
+// Start a throw. Direction is a RISING-EDGE flick after the grab connects -- you
+// cannot hold a direction into a grab.
+//
+// Duration scales with the VICTIM's weight (their x37C), which is the opposite of
+// what you might expect: a heavy character is not harder to throw, just slower to
+// throw. Knockback uses a global weight constant instead, so throw distance does
+// not depend on who you threw.
+void startThrow(GameState &gs, int grabberIdx, uint8_t dir) {
+    Player &g = gs.players[grabberIdx];
+    if (g.grabPartner >= kMaxPlayers) return;
+    Player &v = gs.players[g.grabPartner];
+
+    const fx weightFactor = kFxOne + fx_mul(fighterOf(v).body.weight, kThrow.weightDurationScale);
+    int32_t total = fx_to_int(fx_mul(fxi(kThrow.totalFrames), weightFactor));
+    if (total < kThrow.windupFrames + 1) total = kThrow.windupFrames + 1;
+
+    g.throwDir = dir;
+    g.throwFrames = static_cast<uint8_t>(total);
+    enterState(g, ActionState::Throwing);
+
+    v.throwDir = dir;
+    v.throwFrames = static_cast<uint8_t>(total);
+    // The escape budget is ZEROED here, exactly as theirs is: once a throw starts
+    // it is guaranteed. All escaping happens during the hold.
+    v.grabHoldFrames = 0;
+    enterState(v, ActionState::Thrown);
+}
+
+// Release the victim mid-throw with knockback.
+void releaseThrow(GameState &gs, int grabberIdx) {
+    Player &g = gs.players[grabberIdx];
+    if (g.grabPartner >= kMaxPlayers) return;
+    Player &v = gs.players[g.grabPartner];
+
+    fx damage = kThrow.damageF, growth = kThrow.growthF;
+    int angle = kThrow.angleF;
+    switch (g.throwDir) {
+    case 2:
+        damage = kThrow.damageB;
+        growth = kThrow.growthB;
+        angle = kThrow.angleB;
+        break;
+    case 3:
+        damage = kThrow.damageU;
+        growth = kThrow.growthU;
+        angle = kThrow.angleU;
+        break;
+    case 4:
+        damage = kThrow.damageD;
+        growth = kThrow.growthD;
+        angle = kThrow.angleD;
+        break;
+    default: break;
+    }
+
+    // Knockback uses the GLOBAL weight constant, not the victim's weight. That is
+    // deliberate in the original -- throw distance is the same whoever you threw.
+    AttackData throwBox{};
+    throwBox.damage = damage;
+    throwBox.baseKnockback = kThrow.baseKB;
+    throwBox.knockbackGrowth = growth;
+    throwBox.angleDeg = angle;
+
+    const fx kb = computeKnockback(v.damage, throwBox, damage, kThrow.weightConstant);
+    v.damage += damage;
+
+    const int worldAngle = g.facing > 0 ? angle : 180 - angle;
+    const fx speed = fx_mul(kb, kKnockback.velocityScale);
+    v.kbVelX = fx_mul(fx_cos_deg(worldAngle), speed);
+    v.kbVelY = -fx_mul(fx_sin_deg(worldAngle), speed);
+    v.selfVelX = 0;
+    v.selfVelY = 0;
+    v.hitstunFrames = computeHitstun(kb);
+    v.lastKilledBy = static_cast<uint8_t>(grabberIdx);
+    enterState(v, ActionState::Hitstun);
+
+    // Unlink: the victim is airborne and on their own now.
+    v.grabPartner = kNoAttacker;
+    v.throwDir = 0;
+    v.throwFrames = 0;
+    g.grabPartner = kNoAttacker;
+    g.isGrabber = false;
+}
+
+// Grab attempt resolution -- a hitbox with a catch element, reusing the same
+// closest-point overlap test as attacks. Nearest target wins, as theirs does.
+void resolveGrab(GameState &gs, int grabberIdx) {
+    Player &a = gs.players[grabberIdx];
+    const config::Grab &G = fighterOf(a).grab;
+
+    if (a.stateFrame < static_cast<uint16_t>(G.startupFrames)) return;
+    if (a.stateFrame >= static_cast<uint16_t>(G.startupFrames + G.activeFrames)) return;
+
+    const fx hbX = a.x + G.reachX * a.facing;
+    const fx hbY = a.y + G.reachY;
+
+    int best = -1;
+    int64_t bestDist = 0;
+    for (int t = 0; t < kMaxPlayers; ++t) {
+        if (t == grabberIdx) continue;
+        Player &d = gs.players[t];
+        if (!d.active || d.state == ActionState::Dead) continue;
+        if (d.invulnFrames > 0) continue;
+        // Already in a grab, either side -- cannot be re-grabbed.
+        if (d.grabPartner < kMaxPlayers) continue;
+        // Airborne opponents cannot be grabbed: ground-only, as ours are.
+        if (d.y < gs.stage.groundY - fxi(4)) continue;
+
+        const config::Body &dBody = fighterOf(d).body;
+        const fx left = d.x - dBody.halfWidth, right = d.x + dBody.halfWidth;
+        const fx top = d.y - dBody.height, bottom = d.y;
+        const fx dx = hbX - fx_clamp(hbX, left, right);
+        const fx dy = hbY - fx_clamp(hbY, top, bottom);
+        const int64_t distSq = fx_len_sq(dx, dy);
+        if (distSq > fx_sq(G.radius)) continue;
+
+        if (best < 0 || distSq < bestDist) {
+            best = t;
+            bestDist = distSq;
+        }
+    }
+
+    if (best >= 0) linkGrab(gs, grabberIdx, best);
+}
+
+// Mash drains, matching their two INDEPENDENT inputs per frame: any fresh button,
+// and any change in stick direction. Both can fire together, which is why circling
+// the stick is the optimal escape.
+fx grabMashDrain(const Input &in, const Input &prev, const config::Grab &G) {
+    fx drain = G.drainPerFrame;
+    if (in.pressed(BtnJump, prev) || in.pressed(BtnAttack, prev) || in.pressed(BtnShield, prev)) {
+        drain += G.drainPerMash;
+    }
+    const bool stickMoved = (in.stickX > kStick.deadzone) != (prev.stickX > kStick.deadzone) ||
+                            (in.stickX < -kStick.deadzone) != (prev.stickX < -kStick.deadzone) ||
+                            (in.stickY > kStick.deadzone) != (prev.stickY > kStick.deadzone) ||
+                            (in.stickY < -kStick.deadzone) != (prev.stickY < -kStick.deadzone);
+    if (stickMoved) drain += G.drainPerMash;
+    return drain;
+}
+
+// Throw direction from a rising-edge flick. 0 means no throw requested.
+uint8_t chooseThrowDir(const Player &p, const Input &in) {
+    const int8_t t = kSmash.deflection;
+    if (in.stickY <= -t && p.stickHeldY < kSmash.flickWindow) return 3; // up
+    if (in.stickY >= t && p.stickHeldY < kSmash.flickWindow) return 4;  // down
+    if (p.stickHeldX < kSmash.flickWindow) {
+        if (in.stickX >= t) return (p.facing > 0) ? 1 : 2;
+        if (in.stickX <= -t) return (p.facing > 0) ? 2 : 1;
+    }
+    return 0;
 }
 
 // --- Shield ----------------------------------------------------------------
@@ -511,7 +732,16 @@ void accelGround(Player &p, fx accel, fx target, bool taper) {
 // Shared entry checks for every actionable grounded state: jump and attack.
 // Returns true if a new action was started.
 bool checkGroundActions(Player &p, const Input &in, const Input &prev) {
-    // Shield first: it is the only genuinely free use of a grounded shield press.
+    // GRAB before shield: shield-held + attack-pressed is the grab input (Melee's Z
+    // is literally that combo). Checked first because both conditions include a
+    // held shield, so the shield branch would otherwise swallow every grab.
+    if (in.held(BtnShield) && in.pressed(BtnAttack, prev) && p.grabPartner >= kMaxPlayers) {
+        p.attackId = ATK_NONE;
+        enterState(p, ActionState::Grabbing);
+        return true;
+    }
+
+    // Shield next: it is the only genuinely free use of a grounded shield press.
     // (BtnShield already drives air dodge, L-cancel, tech, get-up buffering and
     // ledge roll -- all in states that are not actionable-grounded, so there is no
     // collision here.)
@@ -972,6 +1202,26 @@ void checkBlastZones(GameState &gs, int idx) {
     }
 
     p.stocks--;
+    // Release any grab this player is part of. A dangling partner reference would
+    // leave the other player permanently stuck holding a corpse.
+    if (p.grabPartner < kMaxPlayers) {
+        Player &other = gs.players[p.grabPartner];
+        if (other.grabPartner == static_cast<uint8_t>(idx)) {
+            other.grabPartner = kNoAttacker;
+            other.isGrabber = false;
+            other.grabHoldFrames = 0;
+            other.throwDir = 0;
+            other.throwFrames = 0;
+            if (other.state == ActionState::GrabHold || other.state == ActionState::Pummel ||
+                other.state == ActionState::Throwing || other.state == ActionState::Grabbed ||
+                other.state == ActionState::Thrown) {
+                enterState(other, ActionState::Idle);
+            }
+        }
+        p.grabPartner = kNoAttacker;
+        p.isGrabber = false;
+        p.grabHoldFrames = 0;
+    }
     enterState(p, ActionState::Dead);
     p.respawnTimer = static_cast<uint16_t>(kRespawn.waitFrames);
     p.selfVelX = p.selfVelY = 0;
@@ -990,6 +1240,53 @@ void checkBlastZones(GameState &gs, int idx) {
         killer.damage = 0;
     }
     p.lastKilledBy = kNoAttacker;
+}
+
+// Drive every grabbed victim's position from their grabber.
+//
+// This runs as its OWN pass after the per-player loop, and that is deliberate. Every
+// other cross-player interaction in this simulation is a single-frame hitbox test:
+// attacker reads defender, applies knockback, done. A grab hold is different -- it
+// spans many frames during which the victim has no physics of their own and their
+// position is a function of someone else's.
+//
+// Doing it inside the per-player loop would make the result depend on player index:
+// a victim in a lower slot than their grabber would be positioned from the grabber's
+// PREVIOUS frame, one in a higher slot from the current frame. We already hit
+// exactly that class of bug with the hitlag countdown, where freeze length silently
+// depended on slot order. A separate pass means both members of the pair see a
+// consistent view, whichever slots they occupy.
+void resolveGrabPairs(GameState &gs) {
+    for (int i = 0; i < kMaxPlayers; ++i) {
+        Player &v = gs.players[i];
+        if (!v.active) continue;
+        if (v.isGrabber) continue;
+        if (v.grabPartner >= kMaxPlayers) continue;
+        if (v.state != ActionState::Grabbed && v.state != ActionState::Thrown) { continue; }
+
+        Player &g = gs.players[v.grabPartner];
+        if (!g.active || g.grabPartner != static_cast<uint8_t>(i)) {
+            // Partner vanished (KO'd, disconnected). Release rather than leaving a
+            // dangling reference -- a stale partner index would desync.
+            v.grabPartner = kNoAttacker;
+            v.grabHoldFrames = 0;
+            v.throwDir = 0;
+            v.throwFrames = 0;
+            enterState(v, ActionState::Airborne);
+            continue;
+        }
+
+        // Melee parents the victim's skeleton to a bone on the grabber. A plain
+        // offset is the same mechanic without the rig.
+        const config::Grab &G = fighterOf(g).grab;
+        v.x = g.x + G.holdOffsetX * g.facing;
+        v.y = g.y + G.holdOffsetY;
+        v.facing = static_cast<int8_t>(-g.facing); // face your captor
+        v.selfVelX = 0;
+        v.selfVelY = 0;
+        v.kbVelX = 0;
+        v.kbVelY = 0;
+    }
 }
 
 } // namespace
@@ -1464,6 +1761,129 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
             if (p.groundActionFrames == 0 || p.selfVelX == 0) { enterState(p, ActionState::Idle); }
             break;
 
+            // --- Grab family -----------------------------------------------------
+
+        case ActionState::Grabbing: {
+            // The attempt. Whiffing is a real punish window, which is the cost
+            // that keeps grab from being a free answer to shielding.
+            const config::Grab &G = F.grab;
+            applyGroundFriction(p);
+            resolveGrab(gs, i);
+            if (p.state != ActionState::Grabbing) break; // connected
+            if (p.stateFrame + 1 >= static_cast<uint16_t>(G.whiffFrames)) {
+                enterState(p, ActionState::Idle);
+            }
+            break;
+        }
+
+        case ActionState::GrabHold: {
+            const config::Grab &G = F.grab;
+            applyGroundFriction(p);
+
+            if (p.grabPartner >= kMaxPlayers) {
+                enterState(p, ActionState::Idle);
+                break;
+            }
+            break;
+
+            // Throw: a rising-edge flick. Cannot be held into the grab.
+            const uint8_t dir = chooseThrowDir(p, in);
+            if (dir != 0) {
+                startThrow(gs, i, dir);
+                break;
+            }
+
+            // Pummel: does NOT reset the hold timer, so pummelling trades damage
+            // against giving the victim more time to mash out.
+            if (in.pressed(BtnAttack, prev)) {
+                p.attackConnected = false; // so this pummel lands its damage
+                enterState(p, ActionState::Pummel);
+                break;
+            }
+
+            // Releasing shield lets them go voluntarily.
+            if (!in.held(BtnShield)) {
+                breakGrab(gs, i);
+                break;
+            }
+
+            // Distance check -- their x34C/x350. If the victim has drifted too
+            // far the hold cannot be maintained.
+            const Player &v = gs.players[p.grabPartner];
+            if (fx_abs(v.x - p.x) > G.maxHoldDistX || fx_abs(v.y - p.y) > G.maxHoldDistY) {
+                breakGrab(gs, i);
+            }
+            break;
+        }
+
+        case ActionState::Pummel: {
+            const config::Grab &G = F.grab;
+            applyGroundFriction(p);
+            if (p.grabPartner >= kMaxPlayers) {
+                enterState(p, ActionState::Idle);
+                break;
+            }
+            // Damage lands once. Cannot test stateFrame == 0: enterState resets
+            // it, but the integration step at the end of the SAME frame
+            // increments it, so a state never observes 0 inside its own case.
+            if (!p.attackConnected) {
+                p.attackConnected = true;
+                gs.players[p.grabPartner].damage += G.pummelDamage;
+            }
+            if (p.stateFrame + 1 >= static_cast<uint16_t>(G.pummelFrames)) {
+                enterState(p, ActionState::GrabHold);
+            }
+            break;
+        }
+
+        case ActionState::Throwing: {
+            applyGroundFriction(p);
+            // The victim is released MID-animation, at the windup frame, not at
+            // the end -- so the thrower is still committed afterwards.
+            // Release at or past the windup frame. A strict == would miss it
+            // entirely, since stateFrame advances at the end of each frame.
+            if (p.stateFrame >= static_cast<uint16_t>(kThrow.windupFrames) &&
+                p.grabPartner < kMaxPlayers) {
+                releaseThrow(gs, i);
+            }
+            if (p.stateFrame + 1 >= static_cast<uint16_t>(p.throwFrames)) {
+                p.throwDir = 0;
+                p.throwFrames = 0;
+                enterState(p, ActionState::Idle);
+            }
+            break;
+        }
+
+        case ActionState::GrabRelease:
+            applyGroundFriction(p);
+            if (p.groundActionFrames > 0) p.groundActionFrames--;
+            if (p.groundActionFrames == 0) enterState(p, ActionState::Idle);
+            break;
+
+        case ActionState::Grabbed: {
+            // Held. No physics of our own -- position is driven by the grabber
+            // in the resolution pass. Mash to escape.
+            if (p.grabPartner >= kMaxPlayers) {
+                enterState(p, ActionState::Idle);
+                break;
+            }
+            const config::Grab &G = fighterOf(gs.players[p.grabPartner]).grab;
+            const fx drain = grabMashDrain(in, prev, G);
+            const int32_t d = fx_to_int(drain);
+            if (p.grabHoldFrames > static_cast<uint16_t>(d)) {
+                p.grabHoldFrames -= static_cast<uint16_t>(d);
+            } else {
+                p.grabHoldFrames = 0;
+            }
+            if (p.grabHoldFrames == 0) breakGrab(gs, i);
+            break;
+        }
+
+        case ActionState::Thrown:
+            // Guaranteed once started -- no escape. The victim is released by
+            // the thrower's Throwing case, which also unlinks them.
+            break;
+
             // --- Shield family ---------------------------------------------------
 
         case ActionState::ShieldOn:
@@ -1480,7 +1900,6 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
                 breakShield(p);
                 break;
             }
-            break;
 
             // ShieldOn is the grow-in only; the shield is already active from
             // frame 1, so this is not a vulnerable window.
@@ -1656,7 +2075,10 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
              p.state == ActionState::ShieldOff || p.state == ActionState::ShieldStun ||
              p.state == ActionState::Dizzy || p.state == ActionState::RollForward ||
              p.state == ActionState::RollBack || p.state == ActionState::SpotDodge ||
-             p.state == ActionState::Landing || p.state == ActionState::Jumpsquat ||
+             p.state == ActionState::Grabbing || p.state == ActionState::GrabHold ||
+             p.state == ActionState::Pummel || p.state == ActionState::Throwing ||
+             p.state == ActionState::GrabRelease || p.state == ActionState::Landing ||
+             p.state == ActionState::Jumpsquat ||
              // Knockdown states are on the ground, so ground
              // friction and ground knockback decay apply.
              p.state == ActionState::DownWait || p.state == ActionState::GetUp ||
@@ -1685,10 +2107,12 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
              p.state == ActionState::ShieldOn || p.state == ActionState::Shield ||
              p.state == ActionState::ShieldOff || p.state == ActionState::ShieldStun ||
              p.state == ActionState::Dizzy || p.state == ActionState::SpotDodge ||
-             p.state == ActionState::Landing || p.state == ActionState::AttackGround ||
-             p.state == ActionState::GetUp || p.state == ActionState::GetUpRoll ||
-             p.state == ActionState::GetUpAttack || p.state == ActionState::Tech ||
-             p.state == ActionState::DownWait);
+             p.state == ActionState::Grabbing || p.state == ActionState::GrabHold ||
+             p.state == ActionState::Pummel || p.state == ActionState::Throwing ||
+             p.state == ActionState::GrabRelease || p.state == ActionState::Landing ||
+             p.state == ActionState::AttackGround || p.state == ActionState::GetUp ||
+             p.state == ActionState::GetUpRoll || p.state == ActionState::GetUpAttack ||
+             p.state == ActionState::Tech || p.state == ActionState::DownWait);
         if (footingMatters) {
             const Stage &st = gs.stage;
             const bool stillSupported = (p.x >= st.platformLeft && p.x <= st.platformRight);
@@ -1841,6 +2265,10 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
 
         checkBlastZones(gs, i);
     }
+
+    // Grab pairs resolve last, once every player has advanced -- see the function
+    // comment for why this cannot live in the loop above.
+    resolveGrabPairs(gs);
 }
 
 uint32_t checksum(const GameState &gs) {
@@ -1885,6 +2313,11 @@ uint32_t checksum(const GameState &gs) {
         mix(p.dizzyFrames);
         mix(static_cast<uint32_t>(p.escapeDir));
         mix(static_cast<uint32_t>(p.pendingPushX));
+        mix(p.grabPartner);
+        mix(p.isGrabber ? 1u : 0u);
+        mix(p.grabHoldFrames);
+        mix(p.throwDir);
+        mix(p.throwFrames);
         mix(static_cast<uint32_t>(p.ledgeSide));
         mix(p.ledgeHangFrames);
         mix(p.ledgeCooldown);

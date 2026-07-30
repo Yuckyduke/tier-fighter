@@ -157,7 +157,13 @@ inspection.
   loss uses the SUM, both players pushed apart, break → dizzy whose length shrinks
   with damage. Out of shield: roll or spotdodge, with windowed invulnerability.
 
-**Not built yet:** netcode, matchmaking transport, grab/throws (phase 2). The sim
+- **Grab and throws** — grab is a hitbox with a catch element; the hold timer
+  scales with the victim's damage; escape is by mashing with two independent
+  drains per frame; four throws chosen by a rising-edge flick, guaranteed once
+  started. Throw knockback uses a global weight constant, so victim weight scales
+  throw *duration* rather than distance.
+
+**Not built yet:** netcode, matchmaking transport. The sim
 library deliberately has zero dependencies so it compiles into a headless server
 unchanged.
 
