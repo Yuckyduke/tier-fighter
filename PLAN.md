@@ -124,6 +124,148 @@ percentages exclude the decomp's unnamed placeholder fields (409 of the 477 glob
 are named `x1F0`, `xA4` and similar) — their purpose is unknown, so they can be
 neither covered nor ruled out, and counting them would make the denominator fiction.
 
+### Findings from the systematic passes
+
+Audits over the decomp — movement, attacks, and the victim's side — turned up
+mechanics the field-by-field coverage sweep could not see, because they live in
+*control flow* rather than in named constants. Ordered by how much each would change
+play.
+
+**On method, for whoever does this next.** The movement and attack passes read broadly
+and were expensive but found genuine surprises — teeter being selected by which
+collision helper a state calls, for instance, which no constant-level sweep could
+reveal. The victim-side pass was done differently: grep for structure first, then read
+the *one* function that matters. That answered four specific questions in four commands
+rather than fifteen minutes of reading. Read broadly to find unknown unknowns; grep
+narrowly to answer questions you can already phrase.
+
+#### Architectural — these are refactors, not additions
+
+- [ ] **Multi-hit resolution is "best knockback wins", not first-hit-wins.** Hits are
+      not applied on contact: they are logged, then a resolution pass recomputes
+      knockback for every logged hit and applies only the **maximum**. Damage from all
+      of them still accumulates. We `break` on the first overlap
+      (`sim.cpp` already flags this as an MVP shortcut). Matters for any move with
+      overlapping hitboxes, and for two players hitting each other on one frame.
+- [ ] **Ground velocity as a scalar projected onto the floor normal.** They store 1D
+      speed along the surface and *recompute* world velocity each frame from the floor
+      normal. Every physics function writes an **acceleration** into an accumulator,
+      integrated centrally once — so friction and acceleration share one channel and
+      are mutually exclusive per frame. Ice scales your ability to *change* speed, not
+      your speed. Prerequisite for slopes.
+- [ ] **Hitboxes are swept capsules from frame 2, but a sphere on frame 1.** Getting
+      this wrong in either direction is visible: sweep on frame 1 and you hit from
+      behind, never sweep and fast hitboxes tunnel.
+- [ ] **Teeter/edge-stop is chosen by which collision helper a state uses**, not by the
+      state machine. Three modes: Wait/Walk/Landing teeter, shield-roll hard-stops,
+      and **Dash/Run/Squat/Turn walk straight off**. That is why running off a ledge is
+      instant while walking off makes you teeter.
+
+#### Mechanics worth building
+
+- [ ] **Stale-move negation** — and the subtle part: staling reduces **damage but not
+      knockback**. Two separate fields on the hitbox; the unstaled value feeds the
+      knockback formula while the staled one raises percent. So a worn-out move
+      launches just as far but builds less damage. A 10-deep queue where only 9 entries
+      are scanned, deduped on (move, instance) but looked up on move alone.
+      "Refreshing" forces a new instance so the move stales *again* rather than
+      clearing anything.
+- [ ] **IASA (interruptible-as-soon-as)** — a single bit set by one animation opcode,
+      not a computed window. Once open you get the entire neutral option list. Crucially
+      the **combo-continuation checks sit outside that guard** and run every frame,
+      which is why jab-cancels work when nothing else does.
+- [ ] **Autocancel** — shares one function with L-cancel. Landing with the autocancel
+      window unset gives plain `Landing` and *zero* aerial lag.
+- [ ] **Crouch** — four states with hysteresis: a *smaller* threshold to exit than to
+      enter, so it does not chatter. Gateway to crouch-cancelling.
+- [ ] **Platform drop-through is buffered, not instant.** A down-flick arms a timer;
+      only when it expires *and* you are still on a platform do you fall. Cancellable,
+      and it costs your grounded jump. Shield-drop is a separate **instant** path with
+      its own constants.
+- [ ] **Phantom hits** — below a penetration-depth threshold a hit deals half damage,
+      no knockback, and no hitlag. Tracked in a second victim list, so the same hitbox
+      can still land a real hit later.
+- [ ] **Clank is an asymmetric damage-difference test.** Two independent one-way
+      comparisons against a tolerance, so **both can rebound, or neither**. A move
+      sufficiently stronger passes through unclanked. Clanking consumes the swing.
+- [ ] **Jab combo chaining** — an input buffer armed per jab. The press must land inside
+      the window **and** the script must have opened a flag. An early press buffers and
+      fires the moment it opens.
+- [ ] **Rapid jab** re-arms its hitbox by bumping the attack instance on each animation
+      loop wrap, which is also what makes it stale per cycle.
+- [ ] **Hit-group** — hitboxes sharing a group share victim lists, which is how a
+      sweetspot/sourspot pair on one swing hits once total.
+- [ ] **Jump horizontal momentum is add-then-clamp**: carried velocity is scaled, the
+      stick contribution is *added*, and the **sum** is clamped. So a dash-jump with
+      neutral stick keeps more speed than one with forward stick.
+- [ ] **Jump's first physics frame is skipped entirely** — no gravity, no drift, and you
+      cannot act. Measurably changes jump height.
+- [ ] **Walking off a ledge requires near-full stick tilt**; below the threshold you
+      stop dead at the edge.
+- [ ] **Turn flips facing, runs attack checks, then flips back** before jump/dash
+      checks — so attacks out of a turn use the new direction but a dash uses the old
+      one. That is what makes turnaround smashes work. It also buffers attack presses
+      during the turn and replays them on completion.
+- [ ] **Landing skips its lag below a velocity threshold** — and the threshold is
+      negative, so the comparison is easy to invert.
+- [ ] **Angled tilts and smashes** — five variants each, resolved once on the input
+      frame from stick angle and baked into a motion state. Nothing about the angle is
+      stored, which is why it survives charging trivially.
+- [ ] **Tap jump sensitivity differs while running** — a separate threshold from
+      standing.
+- [ ] **Player push-apart is a position nudge**, recomputed from scratch each frame,
+      never integrated into velocity. Being pushed backwards also switches you from
+      teeter to hard edge-stop, so you cannot be shoved off a ledge into a teeter.
+- [ ] **Wall bonk only above walk speed, and only from Dash/Run.** Ceiling bonk only
+      from jump states, not from falling.
+- [ ] **Edge slipping** while shielding is a distinct state from teeter, with inverted
+      facing/flag pairing.
+- [ ] **Flick timers must be explicitly consumed** by whoever uses them, or one flick
+      triggers two mechanics. We do this for fast-fall and dash; it is needed wherever
+      a flick is read.
+- [ ] **Combo counter** keyed on (victim, attack id): same id increments, a different
+      one resets.
+
+#### Getting hit — the victim's side
+
+A narrow follow-up pass. Nothing here contradicts what we have built; these are all
+*additions*, which matches the victim side being our most complete area already.
+
+- [ ] **Launch tiers.** Knockback is scaled then banded into four tiers, and the tier
+      indexes a table of reaction states — **indexed by which hurtbox was hit**, so
+      being struck in the head versus the legs picks a different reaction at the same
+      tier. Tier 3 is tumble. A forced state (down-throw) overrides straight to tier 3.
+      At tier 2+ the launch angle is recomputed if the element is Ice, and airborne
+      victims get an extra knockback scale.
+- [ ] **Armor.** Subtracted from knockback *after* the multipliers, in a fixed order:
+      × crouch → × ice → × smash-charge → − armor → clamp to a floor. Two armor sources
+      with `max()` between them, plus a metal-specific addition. The floor means armor
+      can never fully negate a hit.
+- [ ] **Crouch-cancelling is a knockback multiplier** applied before armor —
+      mechanically simple, and it confirms the entry already on this list.
+- [ ] **Intangibility is tri-valued**, not a boolean: Enabled / Disabled / Intangible
+      per hurtbox. *Disabled* still registers contact (for the sound) but deals no
+      damage; *Intangible* skips the test entirely. Our single `invulnFrames` countdown
+      collapses all three into one.
+- [ ] **The flying-body hitbox.** A launched player damages others, but only while
+      their knockback speed is above a threshold. Keyed on an owner pointer so kills
+      are credited to whoever launched them.
+
+#### Known bugs in the original — deliberately NOT porting
+
+Recording these so nobody "fixes" our version into matching them later.
+
+- **Shield-knockback decay zeroes the wrong vector component**, clobbering the regular
+  knockback vector. The decomp flags it as the cause of a known invisible-ceiling
+  glitch.
+- **The hurtbox loop breaks after the first overlap**, so if the highest-priority
+  hurtbox yields a phantom, lower-priority ones that would have given a real hit are
+  never tested. The decomp comments the intended fix.
+- **The angled-attack availability check probes the neighbouring motion state's
+  animation data**, not the one being selected.
+- **Dead code:** a vertical velocity multiply in the jump path is overwritten three
+  lines later. Faithfully reproducing it would be wrong.
+
 ### Mechanics — worth building
 
 Each of these changes how the game plays.
