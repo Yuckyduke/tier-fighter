@@ -182,6 +182,15 @@ const char* stateName(ActionState s) {
         case ActionState::GetUpRoll:    return "Roll";
         case ActionState::GetUpAttack:  return "GetUpAtk";
         case ActionState::Tech:         return "TECH!";
+        case ActionState::ShieldOn:     return "shield^";
+        case ActionState::Shield:       return "SHIELD";
+        case ActionState::ShieldOff:    return "shieldv";
+        case ActionState::ShieldStun:   return "SHLDSTUN";
+        case ActionState::ShieldBroken: return "BROKEN!";
+        case ActionState::Dizzy:        return "DIZZY";
+        case ActionState::RollForward:  return "roll >";
+        case ActionState::RollBack:     return "roll <";
+        case ActionState::SpotDodge:    return "spotdodge";
         case ActionState::FallHelpless: return "HELPLESS";
         case ActionState::LedgeHang:    return "LEDGE";
         case ActionState::LedgeClimb:   return "climb";
@@ -264,6 +273,20 @@ void drawPlayer(const Player& p, int index, const ViewTransform& v, bool showBox
     const float cy = v.sy(p.y - body.height / 2);
     const float tipX = cx + v.len(body.halfWidth) * 1.6f * static_cast<float>(p.facing);
     DrawLineEx(Vector2{cx, cy}, Vector2{tipX, cy}, 3.0f, WHITE);
+
+    // Shield bubble, radius scaled by remaining health so the resource is legible
+    // at a glance rather than only in the text HUD.
+    if (p.state == ActionState::ShieldOn || p.state == ActionState::Shield ||
+        p.state == ActionState::ShieldStun) {
+        const fx maxHp = fighterFor(p).shield.maxHealth;
+        const float frac = maxHp > 0
+            ? fx_to_float(p.shieldHealth) / fx_to_float(maxHp) : 0.0f;
+        const float r = v.len(body.height) * (0.55f + 0.45f * frac);
+        const float bx = v.sx(p.x);
+        const float by = v.sy(p.y - body.height / 2);
+        DrawCircleV(Vector2{bx, by}, r, Color{110, 180, 255, 70});
+        DrawCircleLinesV(Vector2{bx, by}, r, Color{150, 210, 255, 200});
+    }
 
     if (!showBoxes) return;
 
@@ -375,6 +398,27 @@ void drawPlayerHud(const Player& p, int index, int x, int y) {
         std::snprintf(line, sizeof(line), "ledge cooldown %u", p.ledgeCooldown);
         DrawText(line, x, row, 16, Color{200, 120, 120, 255});
         row += 18;
+    }
+    {
+        const fx maxHp = fighterFor(p).shield.maxHealth;
+        if (p.shieldInit && p.shieldHealth < maxHp) {
+            const float frac = fx_to_float(p.shieldHealth) / fx_to_float(maxHp);
+            std::snprintf(line, sizeof(line), "shield %3.0f%%", frac * 100.0f);
+            DrawText(line, x, row, 16,
+                     frac < 0.25f ? Color{255, 110, 110, 255}
+                                  : Color{140, 200, 255, 255});
+            row += 18;
+        }
+    }
+    if (p.shieldStunFrames > 0) {
+        std::snprintf(line, sizeof(line), "shieldstun %u", p.shieldStunFrames);
+        DrawText(line, x, row, 16, Color{255, 200, 120, 255});
+        row += 18;
+    }
+    if (p.dizzyFrames > 0) {
+        std::snprintf(line, sizeof(line), "DIZZY %u (mash!)", p.dizzyFrames);
+        DrawText(line, x, row, 18, Color{255, 140, 220, 255});
+        row += 20;
     }
     if (p.hitlagFrames > 0) {
         std::snprintf(line, sizeof(line), "HITLAG %u   sdi %u/%d",
@@ -493,6 +537,8 @@ int main() {
                 "LEDGE: fall past the stage edge to grab. Then toward-stage = climb,\n"
                 "  shield = roll, attack = ledge attack, jump = jump, down/away = drop.\n"
                 "TECH: press shield just before hitting the ground in hitstun.\n"
+                "SHIELD: hold G. Blocks damage but drains -- run it out and it BREAKS.\n"
+                "  Out of shield: flick sideways = roll, flick down = spotdodge.\n"
                 "SDI: flick the stick during the hit freeze to shift position.\n"
                 "  Re-flick (neutral between) for more -- holding does nothing.\n"
                 "SMASH: flick the stick + attack together (hold attack to charge).\n"

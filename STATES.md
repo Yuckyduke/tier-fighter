@@ -102,10 +102,17 @@ a small gap, listed under LATER-adjacent if you want the flurry.
 
 Ordered by what I'd build first.
 
-### 1. Shield + grab — 35 states (must land together)
-- **Shield (5):** `GuardOn`, `Guard`, `GuardOff`, `GuardSetOff`, `GuardReflect`
-- **Shield break (6):** `ShieldBreak{Fly,Fall,DownU,DownD,StandU,StandD}`
-- **Roll / spot-dodge (4):** `Escape{F,B,N,Air}`
+### DONE (phase 1): Shield + escapes — 15 states
+
+- **Shield (5):** `GuardOn`, `Guard`, `GuardOff`, `GuardSetOff`, `GuardReflect` →
+  our `ShieldOn`, `Shield`, `ShieldOff`, `ShieldStun`. Powershield
+  (`GuardReflect`) deliberately skipped — its own timer web plus reflect hitboxes.
+- **Shield break (6):** `ShieldBreak{Fly,Fall,DownU,DownD,StandU,StandD}` +
+  `Furafura` → our `ShieldBroken` + `Dizzy`.
+- **Ground escapes (4):** `Escape{F,B,N}` → our `RollForward`, `RollBack`,
+  `SpotDodge`. (`EscapeAir` was already the air dodge.)
+
+### 1. Grab + throws — 20 states (phase 2)
 - **Grab (7):** `Catch`, `CatchPull`, `CatchDash`, `CatchDashPull`, `CatchWait`,
   `CatchAttack`, `CatchCut`
 - **Throws (13):** `Throw{F,B,Hi,Lw}`, `Thrown{F,B,Hi,Lw}`, `ThrownF{F,B,Hi,Lw}`,

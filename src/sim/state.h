@@ -48,6 +48,20 @@ enum class ActionState : uint8_t {
     LedgeAttack,   // get-up attack from the ledge; uses ATK_LEDGE
     LedgeJump,     // releasing into a jump
 
+    // --- Shield family -------------------------------------------------------
+    // ShieldOn is the grow-in (the shield is already active), Shield the hold,
+    // ShieldOff the release lag that makes shielding a commitment, ShieldStun the
+    // locked reaction to being hit.
+    ShieldOn, Shield, ShieldOff, ShieldStun,
+
+    // Shield broken: launched helpless, then dizzy and mashable.
+    ShieldBroken, Dizzy,
+
+    // --- Ground escapes ------------------------------------------------------
+    // Roll travels a fixed authored distance and ends stopped; SpotDodge decays
+    // momentum and keeps it. That asymmetry is deliberate.
+    RollForward, RollBack, SpotDodge,
+
     // Helpless fall after an air dodge. Mirrors the decomp's FallSpecial: a
     // distinct state whose input handling has NO air-dodge entry, which is how
     // Melee limits you to one dodge per airborne period without needing a counter.
@@ -155,6 +169,26 @@ struct Player {
     // player who mashes on knockdown has the press consumed during lockout and
     // must release and re-press -- the input would silently vanish.
     uint16_t bufferedButtons = 0;
+
+    // --- Shield --------------------------------------------------------------
+    fx      shieldHealth = 0;      // initialised from the fighter on first use
+    bool    shieldInit = false;    // so health starts full without a constructor
+    uint8_t shieldStunFrames = 0;
+    uint8_t shieldHoldFrames = 0;  // counts toward minHoldFrames
+    // Largest single hit absorbed this frame vs the SUM taken. Shieldstun scales
+    // with the largest, health loss with the sum -- two separate accumulators.
+    fx      shieldLargestHit = 0;
+    fx      shieldDamageSum = 0;
+    uint16_t dizzyFrames = 0;
+
+    // Shield pushback latched at hit time, applied when hitlag lifts. Cannot be
+    // applied immediately: the freeze runs first and its friction would eat it.
+    fx      pendingPushX = 0;
+
+    // Roll start position and direction, latched on entry so the fixed travel
+    // distance is interpolated rather than integrated.
+    fx      rollStartX = 0;
+    int8_t  escapeDir = 0;
 
     // --- Hitlag --------------------------------------------------------------
     // Frames of contact freeze remaining. While non-zero the player does not

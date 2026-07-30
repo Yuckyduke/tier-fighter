@@ -152,7 +152,12 @@ inspection.
   horizontal ceiling separate from the drift target, and turnaround acceleration
   exemption** — see `PHYSICS.md` for how each diverged before.
 
-**Not built yet:** netcode, matchmaking transport, shield/grab/throws. The sim
+- **Shield** — health with three flows (drains held, regenerates when not,
+  proportional + flat damage on hit), shieldstun from the LARGEST hit while health
+  loss uses the SUM, both players pushed apart, break → dizzy whose length shrinks
+  with damage. Out of shield: roll or spotdodge, with windowed invulnerability.
+
+**Not built yet:** netcode, matchmaking transport, grab/throws (phase 2). The sim
 library deliberately has zero dependencies so it compiles into a headless server
 unchanged.
 
