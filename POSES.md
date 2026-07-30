@@ -78,6 +78,8 @@ reads correctly.
 |---|---|
 | `M` | Switch single ↔ sequence mode |
 | `L` | Toggle sequence looping |
+| `B` | Toggle transition blending |
+| `Alt` | Cycle blend length |
 | `[` `]` | Previous / next state (or sequence) |
 | `↑` `↓` | Select joint |
 | `←` `→` | Adjust it (hold `Shift` for ×4) |
@@ -126,6 +128,47 @@ enumerate states:
 In sequence mode the chain is drawn across the top with the active step highlighted,
 so when something snaps you can see *which* transition is at fault. Editing still
 works — the arrow keys adjust whichever state is currently playing.
+
+### Transition blending
+
+Without blending a state change snaps: idle's arms sit at 12°, dash wants 46°, and
+the figure teleports between them on one frame. That reads as a glitch even when both
+poses are individually fine.
+
+So transitions are **generated, not authored**. On a state change the blender captures
+the pose the figure was *actually* in — mid-animation, whatever it happened to be —
+and eases from there into the new animation.
+
+Generated rather than hand-made for two reasons. 42 states means over 1700 ordered
+pairs, and most bridges would be near-identical eases. More importantly, capturing the
+live pose handles a case a hand-authored bridge can't: leaving a state part-way
+through, where the correct starting pose depends on *when* you left.
+
+Three details make it read well rather than merely being continuous:
+
+- **Smoothstep easing.** A linear blend still looks mechanical — the motion starts and
+  stops abruptly even though positions are continuous.
+- **Length scaled by distance.** `poseDistance` sums the joint deltas. Under 30, the
+  poses are close enough to jump directly and a bridge would add latency for nothing.
+  Over 120 (standing to lying flat, say) gets the full window.
+- **Mid-blend interruption.** If a second state change lands while a blend is running,
+  it captures the *blended* result rather than snapping back to the original pose. A
+  rapid A→B→C chain stays smooth.
+
+Measured, idle → DownWait — the largest jump in the set at distance 585:
+
+```
+unblended   lean  +0.0  ->  -84.0        one frame
+blended     lean  +0.0  ->  -8.7  ->  -29.6  ->  -54.4  ->  -75.3  ->  -84.0
+```
+
+Press `B` to toggle blending off. Worth doing occasionally: seeing the snap is how you
+tell whether a transition needs a bridge or whether the underlying poses are wrong.
+`Alt` cycles the blend length so you can feel how long is too long — too much and fast
+actions feel laggy, since the figure is still catching up when the state has moved on.
+
+The blender is stateful and lives with the caller, one per figure, because the game has
+several fighters transitioning independently.
 
 ### Motion trail
 
