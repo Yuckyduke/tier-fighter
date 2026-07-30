@@ -162,6 +162,9 @@ struct Player {
     // in an exchange get one, which is what makes a hit read as an impact rather
     // than a teleport.
     uint8_t hitlagFrames = 0;
+    // SDI nudges used in the current freeze, so a long hitlag cannot be ridden
+    // across the stage. Reset when hitlag is applied.
+    uint8_t sdiNudges = 0;
 
     // --- Ledge ---------------------------------------------------------------
     // Which ledge is held: -1 none, 0 left, 1 right. Stored rather than recomputed
