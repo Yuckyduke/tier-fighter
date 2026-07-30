@@ -81,6 +81,12 @@ int main() {
     Ghost ghosts[10] = {};
     int ghostCount = 0;
     int ghostTimer = 0;
+
+    // Transition blending. A toggle rather than always-on, because seeing the
+    // unblended version is how you tell whether a bridge is actually needed or
+    // whether the underlying poses are simply wrong.
+    pose::Blender blender;
+    bool blendOn = true;
     bool editingB = false; // which keyframe of the animation is being edited
     bool showGrid = true;
     bool sideBySide = true; // draw start and end poses next to the animation
@@ -132,6 +138,15 @@ int main() {
             ghostCount = 0;
         }
         if (IsKeyPressed(KEY_L)) loopSeq = !loopSeq;
+        if (IsKeyPressed(KEY_B)) {
+            blendOn = !blendOn;
+            blender = pose::Blender{}; // reset so the next frame re-primes cleanly
+        }
+        if (IsKeyPressed(KEY_LEFT_ALT)) {
+            // Cycle blend length, so you can feel how long is too long.
+            blender.defaultBlendFrames =
+                (blender.defaultBlendFrames >= 12) ? 2 : blender.defaultBlendFrames + 2;
+        }
 
         // --- Field selection and editing -------------------------------------
         if (IsKeyPressed(KEY_DOWN)) field = (field + 1) % kFieldCount;
@@ -167,7 +182,7 @@ int main() {
             ghostTimer = 0;
             for (int i = 9; i > 0; --i)
                 ghosts[i] = ghosts[i - 1];
-            ghosts[0] = Ghost{pose::poseFor(st, animFrame, 0), 0};
+            ghosts[0] = Ghost{blendOn ? blender.from : pose::poseFor(st, animFrame, 0), 0};
             if (ghostCount < 10) ++ghostCount;
         }
 
@@ -213,9 +228,13 @@ int main() {
             stick::drawPose(ghosts[i].pose, gf, Color{90, 140, 190, alpha}, figH * 0.02f);
         }
 
-        // The animated figure, centre stage.
+        // The animated figure, centre stage. Resolved through the blender so state
+        // changes ease rather than snap -- the whole point of sequence mode is seeing
+        // that seam, so it has to be rendered the way the game will render it.
+        const pose::Pose shown = blendOn ? pose::poseBlended(blender, st, animFrame, 0)
+                                         : pose::poseFor(st, animFrame, 0);
         stick::Frame mainFrame{cx, groundY, figH, 1};
-        stick::drawState(st, animFrame, 0, mainFrame, Color{120, 200, 255, 255}, figH * 0.028f);
+        stick::drawPose(shown, mainFrame, Color{120, 200, 255, 255}, figH * 0.028f);
 
         // Keyframes either side, dimmed, so you can see where the motion starts and
         // ends without scrubbing back and forth.
@@ -232,8 +251,7 @@ int main() {
 
         // A left-facing copy, to confirm mirroring reads correctly.
         stick::Frame mirror{kScreenW * 0.5f + figH * 0.75f, groundY, figH * 0.55f, -1};
-        stick::drawPose(pose::poseFor(st, animFrame, 0), mirror, Color{80, 90, 105, 180},
-                        figH * 0.018f);
+        stick::drawPose(shown, mirror, Color{80, 90, 105, 180}, figH * 0.018f);
 
         // --- HUD -------------------------------------------------------------
         char line[256];
@@ -251,6 +269,11 @@ int main() {
                       an.hasB ? (an.loop ? "cycle" : "lerp") : "hold",
                       (mode == Mode::Sequence && loopSeq) ? "   [looping]" : "");
         DrawText(line, 24, 56, 18, Color{160, 175, 195, 255});
+
+        std::snprintf(line, sizeof(line), "blend %s  (%d fr)%s", blendOn ? "ON" : "off",
+                      blender.defaultBlendFrames, blender.blendLen > 0 ? "   BLENDING" : "");
+        DrawText(line, kScreenW - 260, 22, 18,
+                 blender.blendLen > 0 ? Color{255, 220, 120, 255} : Color{130, 145, 165, 255});
 
         // In sequence mode, show the chain with the active step highlighted -- so it
         // is obvious WHICH transition you are looking at when something snaps.
@@ -277,7 +300,8 @@ int main() {
             y += 22;
         }
 
-        const char *help = "M  single <-> SEQUENCE mode   L  loop\n"
+        const char *help = "M  single <-> SEQUENCE mode   L  loop   B  blending on/off\n"
+                           "ALT  cycle blend length\n"
                            "[ ]  prev/next state or sequence   UP/DOWN  select field\n"
                            "LEFT/RIGHT  adjust (hold SHIFT for x4)\n"
                            "TAB  switch keyframe A/B   SPACE  play/pause\n"

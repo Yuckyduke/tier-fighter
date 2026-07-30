@@ -237,6 +237,15 @@ int indexOf(ActionState st) {
 
 float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
+// Smoothstep. A linear blend still reads as mechanical -- the motion starts and stops
+// abruptly even though the positions are continuous. Easing both ends is what makes a
+// transition look intentional rather than interpolated.
+float ease(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
 Pose blend(const Pose &a, const Pose &b, float t) {
     Pose r;
     r.leanDeg = lerpf(a.leanDeg, b.leanDeg, t);
@@ -440,6 +449,72 @@ bool sequenceSample(const Sequence &seq, int frame, int *outStep, int *outStepFr
     *outStep = seq.count - 1;
     *outStepFrame = stateDuration(seq.steps[seq.count - 1]);
     return false;
+}
+
+float poseDistance(const Pose &a, const Pose &b) {
+    auto d = [](float x, float y) { return x > y ? x - y : y - x; };
+    // Joint angles dominate; crouch and head offset are scaled up to comparable
+    // magnitude since they are fractions rather than degrees.
+    return d(a.leanDeg, b.leanDeg) + d(a.shoulderFrontDeg, b.shoulderFrontDeg) +
+           d(a.elbowFrontDeg, b.elbowFrontDeg) + d(a.shoulderBackDeg, b.shoulderBackDeg) +
+           d(a.elbowBackDeg, b.elbowBackDeg) + d(a.hipFrontDeg, b.hipFrontDeg) +
+           d(a.kneeFrontDeg, b.kneeFrontDeg) + d(a.hipBackDeg, b.hipBackDeg) +
+           d(a.kneeBackDeg, b.kneeBackDeg) + d(a.crouch, b.crouch) * 100.0f +
+           d(a.headOffsetY, b.headOffsetY) * 200.0f;
+}
+
+Pose poseBlended(Blender &b, ActionState st, int stateFrame, uint8_t attackId) {
+    const Pose target = poseFor(st, stateFrame, attackId);
+
+    // First call: nothing to blend from.
+    if (!b.primed) {
+        b.primed = true;
+        b.lastState = st;
+        b.from = target;
+        b.blendLen = 0;
+        return target;
+    }
+
+    // State changed -- start a bridge from wherever the figure actually was. Using
+    // the live pose rather than the previous state's keyframe matters: leaving a
+    // state part-way through should blend from that mid-animation pose, not from
+    // where the animation would have ended.
+    if (st != b.lastState) {
+        const Pose was =
+            b.blendLen > 0
+                // Already mid-blend: capture the blended result so a rapid A->B->C
+                // chain does not snap back to A's pose.
+                ? [&] {
+                      const float t =
+                          ease(static_cast<float>(b.blendFrame) / static_cast<float>(b.blendLen));
+                      return blend(b.from, poseFor(b.lastState, stateFrame, attackId), t);
+                  }()
+                : poseFor(b.lastState, stateFrame, attackId);
+
+        b.from = was;
+        b.lastState = st;
+        b.blendFrame = 0;
+
+        // Scale the bridge to how far the pose has to travel. A small change needs
+        // no bridge at all; a large one (standing to lying down) needs the full
+        // window or it still snaps.
+        const float dist = poseDistance(was, target);
+        if (dist < 30.0f) {
+            b.blendLen = 0; // close enough to jump directly
+        } else if (dist < 120.0f) {
+            b.blendLen = b.defaultBlendFrames / 2;
+        } else {
+            b.blendLen = b.defaultBlendFrames;
+        }
+    }
+
+    if (b.blendLen <= 0) return target;
+
+    const float t = ease(static_cast<float>(b.blendFrame) / static_cast<float>(b.blendLen));
+    const Pose out = blend(b.from, target, t);
+
+    if (++b.blendFrame > b.blendLen) b.blendLen = 0;
+    return out;
 }
 
 Anim &animFor(ActionState st) { return kAnims[indexOf(st)]; }

@@ -52,6 +52,45 @@ struct Anim {
 // the game cannot disagree about what a state looks like.
 Pose poseFor(ActionState st, int stateFrame, uint8_t attackId);
 
+// --- Transition blending -----------------------------------------------------
+// Without blending, a state change snaps instantly from one pose to another: idle's
+// arms are at 12 degrees, dash wants 46, and the figure teleports between them on a
+// single frame. That reads as a glitch even when both poses are individually fine.
+//
+// The fix is a short generated bridge. On a state change we capture the pose the
+// figure was ACTUALLY in -- mid-animation, whatever it happened to be -- and ease
+// from that into the new animation over a few frames.
+//
+// Generated rather than authored, deliberately. 42 states means over 1700 ordered
+// pairs; hand-making bridges for those is not a real option, and most would be
+// near-identical eases anyway. Capturing the live pose also handles the case a
+// hand-authored bridge cannot: leaving a state part-way through, where the starting
+// pose depends on when you left.
+//
+// Blender is stateful, so it lives with the caller (one per player, one in the
+// editor) rather than being a global -- the game has several fighters transitioning
+// independently.
+struct Blender {
+    Pose from{}; // pose we were in when the state changed
+    ActionState lastState{};
+    int blendFrame = 0;  // frames into the current blend
+    int blendLen = 0;    // 0 = not blending
+    bool primed = false; // false until the first pose is seen
+
+    // Per-state blend lengths would be per-pair in the ideal case, but a single
+    // duration plus an ease curve gets most of the benefit. Short enough not to feel
+    // laggy on fast actions, long enough to hide a large pose jump.
+    int defaultBlendFrames = 5;
+};
+
+// The blended pose. Call once per frame per figure, in order -- it detects the state
+// change itself by comparing against the previous call.
+Pose poseBlended(Blender &b, ActionState st, int stateFrame, uint8_t attackId);
+
+// How far apart two poses are, in degrees summed across the joints. Used to scale
+// blend length: a small change needs no bridge, a large one needs a longer ease.
+float poseDistance(const Pose &a, const Pose &b);
+
 // --- Sequences ---------------------------------------------------------------
 // A pose in isolation says little; what usually reads badly is the TRANSITION
 // between two states. A sequence chains states back-to-back, each held for its own
