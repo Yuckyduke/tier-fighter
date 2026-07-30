@@ -1,5 +1,7 @@
 #include "sim/config.h"
 #include "sim/state.h"
+#include "skeleton.h"
+#include "stickfigure.h"
 
 #include <raylib.h>
 
@@ -245,7 +247,12 @@ void drawStage(const Stage& s, const ViewTransform& v) {
     }
 }
 
-void drawPlayer(const Player& p, int index, const ViewTransform& v, bool showBoxes) {
+// One blender per player -- they transition independently, and a shared blender
+// would bridge from whichever player happened to be drawn last.
+pose::Blender gBlenders[kMaxPlayers];
+
+void drawPlayer(const Player& p, int index, const ViewTransform& v, bool showBoxes,
+                bool stickFigures) {
     if (!p.active || p.state == ActionState::Dead) return;
 
     const auto& body = fighterFor(p).body;
@@ -273,13 +280,38 @@ void drawPlayer(const Player& p, int index, const ViewTransform& v, bool showBox
     const float w = v.len(body.halfWidth * 2);
     const float h = v.len(body.height);
 
-    DrawRectangleV(Vector2{left, top}, Vector2{w, h}, c);
+    if (stickFigures) {
+        // The figure stands ON the collision box's base, and is drawn taller than
+        // the box -- the box is a hurtbox, not a silhouette, so matching it exactly
+        // would produce a squat figure. Feet at the box base keeps the visual
+        // grounded where the simulation thinks the player is.
+        const float footY = v.sy(p.y);
+        const float figH = h * 1.6f;
+        stick::Frame sf{v.sx(p.x), footY, figH, p.facing};
 
-    // Facing indicator: which way an attack will come out.
-    const float cx = v.sx(p.x);
-    const float cy = v.sy(p.y - body.height / 2);
-    const float tipX = cx + v.len(body.halfWidth) * 1.6f * static_cast<float>(p.facing);
-    DrawLineEx(Vector2{cx, cy}, Vector2{tipX, cy}, 3.0f, WHITE);
+        // Resolved through this player's blender so state changes ease rather than
+        // snap. attackFrame drives attack poses so charge holds read correctly --
+        // a held smash freezes attackFrame, so the wind-up pose holds with it.
+        const int animFrame = (p.state == ActionState::AttackGround ||
+                               p.state == ActionState::AttackAir ||
+                               p.state == ActionState::GetUpAttack ||
+                               p.state == ActionState::LedgeAttack)
+                                  ? static_cast<int>(p.attackFrame)
+                                  : static_cast<int>(p.stateFrame);
+
+        const pose::Pose shown =
+            pose::poseBlended(gBlenders[index], p.state, animFrame, p.attackId);
+        stick::drawPose(shown, sf, c, figH * 0.030f);
+    } else {
+        DrawRectangleV(Vector2{left, top}, Vector2{w, h}, c);
+
+        // Facing indicator: which way an attack will come out.
+        const float cx = v.sx(p.x);
+        const float cy = v.sy(p.y - body.height / 2);
+        const float tipX =
+            cx + v.len(body.halfWidth) * 1.6f * static_cast<float>(p.facing);
+        DrawLineEx(Vector2{cx, cy}, Vector2{tipX, cy}, 3.0f, WHITE);
+    }
 
     // Shield bubble, radius scaled by remaining health so the resource is legible
     // at a glance rather than only in the text HUD.
@@ -486,17 +518,24 @@ int main() {
     const ViewTransform view = fitStage(gs.stage, kScreenW, kScreenH);
 
     bool showBoxes = true;
+    // Stick figures by default; K flips back to boxes. Boxes remain genuinely
+    // useful -- they show the hurtbox exactly, which a figure only approximates.
+    bool stickFigures = true;
     bool paused = false;
     bool showHelp = true;
 
     while (!WindowShouldClose()) {
         // --- Debug controls (these act on the harness, never on sim state) ----
         if (IsKeyPressed(KEY_H)) showBoxes = !showBoxes;
+        if (IsKeyPressed(KEY_K)) stickFigures = !stickFigures;
         if (IsKeyPressed(KEY_P)) paused = !paused;
         if (IsKeyPressed(KEY_TAB)) showHelp = !showHelp;
         if (IsKeyPressed(KEY_R)) {
             gs = makeLocalMatch();
             std::memset(prev, 0, sizeof(prev));
+            // Re-prime the blenders, or the first frame after a reset bridges from
+            // whatever pose the players were in before it.
+            for (auto& b : gBlenders) b = pose::Blender{};
         }
 
         // Frame-advance while paused. This is how you actually verify frame data:
@@ -524,7 +563,7 @@ int main() {
 
         drawStage(gs.stage, view);
         for (int i = 0; i < 2; ++i) {
-            drawPlayer(gs.players[i], i, view, showBoxes);
+            drawPlayer(gs.players[i], i, view, showBoxes, stickFigures);
         }
 
         drawPlayerHud(gs.players[0], 0, 24, 20);
@@ -560,7 +599,7 @@ int main() {
                 "SMASH: flick the stick + attack together (hold attack to charge).\n"
                 "  Holding a direction first gives a TILT instead.\n"
                 "\n"
-                "H hitboxes   P pause   N step frame   ALT slow-mo   R reset   TAB hide";
+                "K figures/boxes   H hitboxes   P pause   N step frame   ALT slow-mo   R reset   TAB hide";
             const int boxH = 260;
             DrawRectangle(16, kScreenH - boxH - 16, 700, boxH, Color{0, 0, 0, 150});
             DrawText(help, 28, kScreenH - boxH - 4, 15, Color{190, 195, 205, 255});
