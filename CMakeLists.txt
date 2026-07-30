@@ -50,21 +50,43 @@ if(NOT raylib_FOUND)
 endif()
 
 if(raylib_FOUND OR (RAYLIB_LIB AND RAYLIB_INCLUDE))
+    # Shared presentation code. Stick-figure poses are data, so the game and the
+    # pose editor read the same table and cannot disagree about what a state
+    # looks like.
+    add_library(tf_render STATIC
+        src/render/skeleton.cpp
+        src/render/stickfigure.cpp
+    )
+    target_link_libraries(tf_render PUBLIC tf_sim)
+    target_compile_options(tf_render PRIVATE -Wall -Wextra)
+
+    # Every raylib-linked target needs the same wiring, so do it once.
+    function(tf_link_raylib target)
+        if(raylib_FOUND)
+            target_link_libraries(${target} PRIVATE raylib)
+        else()
+            target_include_directories(${target} PRIVATE ${RAYLIB_INCLUDE})
+            target_link_libraries(${target} PRIVATE ${RAYLIB_LIB})
+        endif()
+        if(APPLE)
+            target_link_libraries(${target} PRIVATE
+                "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
+        endif()
+    endfunction()
+
+    tf_link_raylib(tf_render)
+
     add_executable(tf_play src/render/main.cpp)
-    target_link_libraries(tf_play PRIVATE tf_sim)
+    target_link_libraries(tf_play PRIVATE tf_render)
     target_compile_options(tf_play PRIVATE -Wall -Wextra)
+    tf_link_raylib(tf_play)
 
-    if(raylib_FOUND)
-        target_link_libraries(tf_play PRIVATE raylib)
-    else()
-        target_include_directories(tf_play PRIVATE ${RAYLIB_INCLUDE})
-        target_link_libraries(tf_play PRIVATE ${RAYLIB_LIB})
-    endif()
-
-    if(APPLE)
-        target_link_libraries(tf_play PRIVATE
-            "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
-    endif()
+    # Standalone pose editor: one figure, one state, no game around it. Kept as its
+    # own target so pose work is not entangled with gameplay work.
+    add_executable(tf_poses src/render/pose_editor.cpp)
+    target_link_libraries(tf_poses PRIVATE tf_render)
+    target_compile_options(tf_poses PRIVATE -Wall -Wextra)
+    tf_link_raylib(tf_poses)
 else()
-    message(WARNING "raylib not found -- skipping tf_play. Tests still build.")
+    message(WARNING "raylib not found -- skipping tf_play and tf_poses. Tests still build.")
 endif()
