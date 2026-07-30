@@ -206,8 +206,18 @@ First-pass poses exist for all 42 states, written from reasoning about what each
 state should communicate rather than from observation. **Expect some to read badly** —
 that's what the editor is for.
 
-The game client still draws rectangles; the swap to stick figures is pending, and
-will keep a toggle back to boxes for hitbox debugging.
+The game client now draws stick figures. Press `K` in `tf_play` to flip back to
+rectangles — boxes stay genuinely useful, since they show the hurtbox *exactly* while
+a figure only approximates it. `H` still toggles hitboxes independently.
+
+Two details in the game path worth knowing:
+
+- **Attack poses key off `attackFrame`, not `stateFrame`.** That is what makes a held
+  smash charge read correctly: charging freezes `attackFrame`, so the wind-up pose
+  freezes with it rather than continuing to interpolate.
+- **The figure is drawn taller than the collision box** (1.6x) and stands on its base.
+  The box is a hurtbox, not a silhouette — matching it exactly produces a squat
+  figure — but the feet stay where the simulation thinks the player is.
 
 ## Adding a state
 

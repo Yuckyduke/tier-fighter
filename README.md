@@ -79,8 +79,8 @@ not yet wired to the client.
 Gamepads work too, and are strongly preferred — several techniques depend on
 analog stick angles that a keyboard can only express as a 45° diagonal.
 
-**Debug keys:** `H` hitboxes · `P` pause · `N` step one frame · `Alt` slow-mo ·
-`R` reset · `Tab` hide help
+**Debug keys:** `K` stick figures / boxes · `H` hitboxes · `P` pause · `N` step one
+frame · `Alt` slow-mo · `R` reset · `Tab` hide help
 
 ### Techniques to try
 
@@ -189,8 +189,7 @@ Not built yet:
   the client still runs a single bare match.
 - **Art.** Fighters are procedural stick figures rather than sprites — 42 action
   states would otherwise mean 40+ hand-drawn animations per character. Poses are
-  authored as joint angles in a dedicated editor; see [POSES.md](POSES.md). The game
-  client still draws rectangles pending the swap.
+  authored as joint angles in a dedicated editor; see [POSES.md](POSES.md).
 
 `tools/coverage.py` reports how much of the physics surface is covered, and is
 honest about what it can't determine.
