@@ -51,6 +51,7 @@ client (CMake will warn and skip the `tf_play` target).
 
 ```sh
 ./build/tf_play          # local 2-player playtest
+./build/tf_poses         # stick-figure pose editor (see POSES.md)
 ./build/tf_tests         # simulation tests
 ./build/tf_arena_tests   # arena / matchmaking tests
 ```
@@ -102,8 +103,8 @@ src/sim/          the simulation — zero dependencies, compiles into a headless
   state.h         Player + GameState
   sim.cpp         step(state, inputs) -> state
   arena.h/cpp     stage pool, KO scoring, streaks, routing, leaderboard
-src/render/       playtest client (the only target that links a graphics library)
-tests/            643 checks
+src/render/       presentation: playtest client, stick-figure poses, pose editor
+tests/            809 checks
 tools/coverage.py physics coverage audit
 ```
 
@@ -154,6 +155,7 @@ Longer write-ups live alongside the code:
 - **[NOTES.md](NOTES.md)** — design decisions and why the tiered-tower idea was cut
 - **[PHYSICS.md](PHYSICS.md)** — physics systems, what's implemented, what's missing
 - **[STATES.md](STATES.md)** — action-state design
+- **[POSES.md](POSES.md)** — stick-figure poses and the pose editor
 
 One idea worth pulling out, because it shaped everything else:
 
@@ -170,21 +172,25 @@ and players discover things you didn't design.
 
 ## Status
 
-**643 checks passing.** The simulation, arena, and playtest client work.
+**809 checks passing.** The simulation, arena, playtest client, and pose editor work.
 
-Implemented: full attack matrix (jab, tilts, chargeable smashes, five aerials),
-per-character fighters, knockdown/tech with get-up options, ledges, hitlag,
-two-tier speed-dependent ground friction.
+Implemented: full attack matrix (jab, tilts, chargeable smashes, five aerials);
+per-character fighters; knockdown, tech and get-up options; ledges; hitlag and SDI;
+shield with health, break and dizzy; rolls and spotdodge; grabs, pummel and four
+throws; separate dash and run states with turnaround frames; two-tier
+speed-dependent ground friction.
 
 Not built yet:
 
 - **Netcode.** The simulation is built for it but no transport exists. This is the
-  big one.
-- **Shield, roll, grabs, throws.** These have to land together — shield without
-  grab is strictly dominant, grab without shield is useless.
-- **Dash/run split.** Currently one snap-to-speed state, so no dash-dancing.
-- **Art.** The renderer draws rectangles. Deliberately: the point is judging feel
-  before spending time on presentation.
+  big one — everything else is playable locally only.
+- **Front end.** No menus, so `tf_play` drops straight into a hardcoded match.
+- **Arena wiring.** Stage pooling and KO scoring are implemented and tested but
+  the client still runs a single bare match.
+- **Art.** Fighters are procedural stick figures rather than sprites — 42 action
+  states would otherwise mean 40+ hand-drawn animations per character. Poses are
+  authored as joint angles in a dedicated editor; see [POSES.md](POSES.md). The game
+  client still draws rectangles pending the swap.
 
 `tools/coverage.py` reports how much of the physics surface is covered, and is
 honest about what it can't determine.

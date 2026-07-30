@@ -1784,7 +1784,6 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
                 enterState(p, ActionState::Idle);
                 break;
             }
-            break;
 
             // Throw: a rising-edge flick. Cannot be held into the grab.
             const uint8_t dir = chooseThrowDir(p, in);
@@ -1806,6 +1805,18 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
                 breakGrab(gs, i);
                 break;
             }
+            // Damage lands once. Cannot test stateFrame == 0: enterState resets
+            // it, but the integration step at the end of the SAME frame
+            // increments it, so a state never observes 0 inside its own case.
+            if (!p.attackConnected) {
+                p.attackConnected = true;
+                gs.players[p.grabPartner].damage += G.pummelDamage;
+            }
+            if (p.stateFrame + 1 >= static_cast<uint16_t>(G.pummelFrames)) {
+                enterState(p, ActionState::GrabHold);
+            }
+            break;
+        }
 
             // Distance check -- their x34C/x350. If the victim has drifted too
             // far the hold cannot be maintained.
