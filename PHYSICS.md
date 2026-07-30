@@ -58,7 +58,19 @@ assigns `walkSpeed` directly (`sim.cpp:269`), so walking is instant-on at full
 speed. The three tier thresholds are for animation blending; reading stick magnitude
 is arguably better, but the missing acceleration is a real difference in feel.
 
-### Dashing and running — we diverge significantly
+### Dashing and running — NOW IMPLEMENTED
+
+`Dash`, `Run`, `RunBrake`, and `Turn` are distinct states. Dash is interruptible
+(a fresh flick re-enters it — that's dash-dancing); Run is not, and leaving it
+requires braking. Run acceleration tapers by `(1 - vel/target)` per
+`ftCo_Run_Phys`. The dash impulse is velocity-relative per `ftCo_Dash_Enter`, so
+reversals snap while continuing stays smooth.
+
+Verified: a held dash commits to a run after `dashFrames`; a dash-dance holds
+position with non-accumulating drift (21px at 5, 20, and 40 cycles); reversing out
+of a run forces a brake.
+
+### Original analysis — dashing and running
 
 | Theirs | Ours |
 |---|---|
@@ -263,12 +275,12 @@ Ordered by impact per unit of work:
 | 5 | **Turnaround accel exemption** | Snappier reversals. | **DONE** |
 | 6 | **Separate hard velocity ceiling** | Momentum can exceed the drift target. | **DONE** |
 | 7 | **SDI** | Needs hitlag (now present) as its window. | open |
-| 8 | **Dash / Run split + turn frames** | Unlocks dash-dancing. | open |
-| 9 | **Walk/dash acceleration** | Movement is still instant-on. | open |
+| 8 | **Dash / Run split + turn frames** | Unlocks dash-dancing. | **DONE** |
+| 9 | **Walk/dash acceleration** | Movement was instant-on. | **DONE** |
 | 10 | **Crouch + crouch-cancel** (`kb_squat_mul`) | Reduces knockback taken. Was miscalled cosmetic. | open |
 | 11 | **Tap-jump** (`tap_jump_threshold`) | Flick up to jump. No such input exists. | open |
 | 12 | **Jump horizontal momentum transfer** | Tunes dash-then-jump. | open |
-| 13 | **`ground_max_horizontal_velocity`** | Ground speed ceiling. | open |
+| 13 | **`ground_max_horizontal_velocity`** | Ground speed ceiling. | **DONE** |
 | 14 | **`gr_vel` + slope projection** | Only matters once stages have slopes. | open |
 
 ## Measuring coverage

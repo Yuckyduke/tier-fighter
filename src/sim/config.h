@@ -31,8 +31,49 @@ struct Jump {
 // Friction is what makes wavedashing worth doing: low friction means momentum
 // carried out of an air dodge slides a long way.
 struct GroundMove {
+    // --- Walking -------------------------------------------------------------
+    // Walk RAMPS rather than snapping: an initial velocity on the first frame,
+    // then acceleration toward the cap. Instant-on movement is the single biggest
+    // giveaway that a fighter's ground game is shallow.
+    fx walkInitVel   = fx_ratio(4, 10);
+    fx walkAccel     = fx_ratio(16, 100);
     fx walkSpeed = fx_ratio(14, 10);
+
+    // --- Dash and Run --------------------------------------------------------
+    // These are DISTINCT states, and the distinction is the mechanic:
+    //   Dash is INTERRUPTIBLE  -> flick the other way and you re-enter it
+    //   Run is NOT             -> leaving it requires RunBrake
+    //
+    // That is the whole basis of dash-dancing. ftCo_Dash_CheckInput re-enters Dash
+    // on every fresh stick flick (using the same recency timer that separates a
+    // smash from a tilt); Run has no such entry. Collapse the two into one
+    // snap-to-speed state and there is nothing to dance with.
+    fx dashInitVel   = fx_ratio(22, 10);   // impulse on entering a dash
+    fx dashAccel     = fx_ratio(22, 100);
     fx dashSpeed = fx_ratio(34, 10);
+
+    // Frames a dash lasts before it commits into a run. This window IS the
+    // dash-dance timing: flick within it and you get a fresh dash instead.
+    int dashFrames   = 12;
+
+    // Run acceleration TAPERS as you approach top speed, scaled by
+    // (1 - vel/target) -- hard at low speed, easing into the cap. From
+    // ftCo_Run_Phys. Without the taper a run reaches top speed abruptly and feels
+    // like a switch rather than a build-up.
+    fx runAccel      = fx_ratio(18, 100);
+    fx runTaper      = fx_ratio(12, 10);
+
+    // Braking out of a run, and turning on the spot. Both are COMMITMENTS -- a
+    // free instant reversal removes the risk from committing to a direction, and
+    // with it most of the ground game's texture.
+    int runBrakeFrames = 12;
+    fx  runBrakeFriction = fx_ratio(28, 100);
+    int turnFrames     = 6;    // frames_to_change_direction_on_standing_turn
+    int dashTurnFrames = 3;    // reversing out of a dash is faster than standing
+
+    // Hard ceiling on ground speed, separate from dashSpeed -- momentum from a
+    // wavedash or a launch can exceed what you could accelerate to.
+    fx maxHorizontal = fx_ratio(42, 10);
 
     // Friction is SPEED-DEPENDENT, in two tiers. From ft_80084F3C:
     //
@@ -741,8 +782,24 @@ constexpr Fighter kFighters[CHAR_COUNT] = {
         Body{/*halfWidth*/fxi(21), /*height*/fxi(58), /*weight*/fxi(140)},
         Jump{/*jumpsquat*/6, /*full*/fx_ratio(-56, 10), /*hop*/fx_ratio(-32, 10),
              /*airJump*/fx_ratio(-50, 10), /*maxAirJumps*/1},
-        GroundMove{/*walk*/fx_ratio(10, 10), /*dash*/fx_ratio(25, 10),
-                   /*friction*/fx_ratio(12, 100), /*fastMultiplier*/fxi(3)},
+        GroundMove{
+            .walkInitVel = fx_ratio(3, 10),
+            .walkAccel = fx_ratio(11, 100),
+            .walkSpeed = fx_ratio(10, 10),
+            .dashInitVel = fx_ratio(16, 10),
+            .dashAccel = fx_ratio(15, 100),
+            .dashSpeed = fx_ratio(25, 10),
+            .dashFrames = 14,
+            .runAccel = fx_ratio(13, 100),
+            .runTaper = fx_ratio(12, 10),
+            .runBrakeFrames = 18,
+            .runBrakeFriction = fx_ratio(22, 100),
+            .turnFrames = 9,
+            .dashTurnFrames = 5,
+            .maxHorizontal = fx_ratio(32, 10),
+            .friction = fx_ratio(12, 100),
+            .fastMultiplier = fxi(3),
+        },
         AirMove{/*maxSpeed*/fx_ratio(14, 10), /*accel*/fx_ratio(8, 100),
                 /*friction*/fx_ratio(2, 100), /*gravity*/fx_ratio(28, 100),
                 /*termVel*/fx_ratio(66, 10), /*fastFall*/fx_ratio(105, 10)},

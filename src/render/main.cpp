@@ -154,6 +154,8 @@ const char* attackName(uint8_t id) {
         case config::ATK_AIR_BACK:    return "bair";
         case config::ATK_AIR_UP:      return "uair";
         case config::ATK_AIR_DOWN:    return "dair (spike)";
+        case config::ATK_GETUP:       return "get-up attack";
+        case config::ATK_LEDGE:       return "ledge attack";
         default:                      return "";
     }
 }
@@ -162,7 +164,10 @@ const char* stateName(ActionState s) {
     switch (s) {
         case ActionState::Idle:         return "Idle";
         case ActionState::Walk:         return "Walk";
-        case ActionState::Dash:         return "Dash";
+        case ActionState::Dash:         return "DASH";
+        case ActionState::Run:          return "RUN";
+        case ActionState::RunBrake:     return "brake";
+        case ActionState::Turn:         return "turn";
         case ActionState::Jumpsquat:    return "Jumpsquat";
         case ActionState::Airborne:     return "Airborne";
         case ActionState::Landing:      return "Landing";
@@ -177,6 +182,7 @@ const char* stateName(ActionState s) {
         case ActionState::GetUpRoll:    return "Roll";
         case ActionState::GetUpAttack:  return "GetUpAtk";
         case ActionState::Tech:         return "TECH!";
+        case ActionState::FallHelpless: return "HELPLESS";
         case ActionState::LedgeHang:    return "LEDGE";
         case ActionState::LedgeClimb:   return "climb";
         case ActionState::LedgeRoll:    return "ledge roll";
