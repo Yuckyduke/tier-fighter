@@ -471,27 +471,26 @@ Pose poseBlended(Blender &b, ActionState st, int stateFrame, uint8_t attackId) {
         b.primed = true;
         b.lastState = st;
         b.from = target;
+        b.lastRendered = target;
         b.blendLen = 0;
         return target;
     }
 
-    // State changed -- start a bridge from wherever the figure actually was. Using
-    // the live pose rather than the previous state's keyframe matters: leaving a
-    // state part-way through should blend from that mid-animation pose, not from
-    // where the animation would have ended.
+    // State changed -- bridge from the pose we LAST RENDERED.
+    //
+    // It has to be the remembered pose rather than a re-derived one. By the time we
+    // see a state change the frame counter belongs to the NEW state and has already
+    // reset, so feeding it back into the old animation samples that animation's
+    // opening pose. An attack ending with its arm extended at +92 degrees would
+    // blend from the wind-up at -20 instead, snapping the arm backwards before
+    // easing to idle.
+    //
+    // Remembering also handles mid-blend interruption for free: lastRendered is
+    // already the blended result, so a rapid A->B->C chain stays continuous without
+    // a special case.
     if (st != b.lastState) {
-        const Pose was =
-            b.blendLen > 0
-                // Already mid-blend: capture the blended result so a rapid A->B->C
-                // chain does not snap back to A's pose.
-                ? [&] {
-                      const float t =
-                          ease(static_cast<float>(b.blendFrame) / static_cast<float>(b.blendLen));
-                      return blend(b.from, poseFor(b.lastState, stateFrame, attackId), t);
-                  }()
-                : poseFor(b.lastState, stateFrame, attackId);
-
-        b.from = was;
+        b.from = b.lastRendered;
+        const Pose was = b.from;
         b.lastState = st;
         b.blendFrame = 0;
 
@@ -508,12 +507,16 @@ Pose poseBlended(Blender &b, ActionState st, int stateFrame, uint8_t attackId) {
         }
     }
 
-    if (b.blendLen <= 0) return target;
+    if (b.blendLen <= 0) {
+        b.lastRendered = target;
+        return target;
+    }
 
     const float t = ease(static_cast<float>(b.blendFrame) / static_cast<float>(b.blendLen));
     const Pose out = blend(b.from, target, t);
 
     if (++b.blendFrame > b.blendLen) b.blendLen = 0;
+    b.lastRendered = out;
     return out;
 }
 

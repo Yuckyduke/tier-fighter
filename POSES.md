@@ -151,9 +151,14 @@ Three details make it read well rather than merely being continuous:
 - **Length scaled by distance.** `poseDistance` sums the joint deltas. Under 30, the
   poses are close enough to jump directly and a bridge would add latency for nothing.
   Over 120 (standing to lying flat, say) gets the full window.
-- **Mid-blend interruption.** If a second state change lands while a blend is running,
-  it captures the *blended* result rather than snapping back to the original pose. A
-  rapid A→B→C chain stays smooth.
+- **Blends from the pose last rendered**, not from a re-derived one. This one is
+  subtle and was a real bug: by the time a state change is visible, the frame counter
+  belongs to the *new* state and has already reset — so feeding it back into the old
+  animation samples that animation's *opening* pose. An attack finishing with its arm
+  extended at +92° blended from its wind-up at −20° instead, snapping the arm
+  backwards before easing to idle. Remembering the rendered pose also makes mid-blend
+  interruption work for free, so a rapid A→B→C chain stays continuous with no special
+  case.
 
 Measured, idle → DownWait — the largest jump in the set at distance 585:
 

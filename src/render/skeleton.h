@@ -72,6 +72,12 @@ Pose poseFor(ActionState st, int stateFrame, uint8_t attackId);
 // independently.
 struct Blender {
     Pose from{}; // pose we were in when the state changed
+    // The pose actually RENDERED last frame. The blend must start from this, not
+    // from re-deriving the old state's pose: on a transition the new state's frame
+    // counter has already reset, so sampling the old animation with it returns its
+    // OPENING pose. That made an attack's arm snap back to the wind-up before easing
+    // to idle, instead of continuing from where it finished.
+    Pose lastRendered{};
     ActionState lastState{};
     int blendFrame = 0;  // frames into the current blend
     int blendLen = 0;    // 0 = not blending
