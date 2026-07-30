@@ -63,28 +63,75 @@ int main() {
     InitWindow(kScreenW, kScreenH, "tier-fighter -- pose editor");
     SetTargetFPS(60);
 
+    // Two modes. SINGLE isolates one state for editing angles; SEQUENCE chains
+    // states so transitions are visible -- which is where problems usually are, since
+    // a pose can look fine alone and still snap badly into its neighbour.
+    enum class Mode { Single, Sequence };
+    Mode mode = Mode::Single;
+
     int stateIdx = 0;
+    int seqIdx = 0;
     int field = 0;
     int frame = 0;
     bool playing = true;
+    bool loopSeq = true;
+    // Trail of recent positions, so fast motion is legible rather than a blur.
+    struct Ghost { pose::Pose pose; int age; };
+    Ghost ghosts[10] = {};
+    int ghostCount = 0;
+    int ghostTimer = 0;
     bool editingB = false;      // which keyframe of the animation is being edited
     bool showGrid = true;
     bool sideBySide = true;     // draw start and end poses next to the animation
     float scale = 1.0f;
 
     while (!WindowShouldClose()) {
-        const ActionState st = pose::stateByIndex(stateIdx);
-        pose::Anim& an = pose::animFor(st);
-
-        // --- State selection -------------------------------------------------
-        if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_N)) {
-            stateIdx = (stateIdx + 1) % pose::stateCount();
+        if (IsKeyPressed(KEY_M)) {
+            mode = (mode == Mode::Single) ? Mode::Sequence : Mode::Single;
             frame = 0;
+            ghostCount = 0;
+        }
+
+        // In sequence mode the displayed state is whichever step is playing, so the
+        // editor always edits the pose you are actually looking at.
+        const pose::Sequence& seq = pose::sequenceAt(seqIdx);
+        int seqStep = 0, seqStepFrame = 0;
+        bool seqRunning = true;
+        if (mode == Mode::Sequence) {
+            seqRunning = pose::sequenceSample(seq, frame, &seqStep, &seqStepFrame);
+            if (!seqRunning && loopSeq) {
+                frame = 0;
+                pose::sequenceSample(seq, frame, &seqStep, &seqStepFrame);
+                seqRunning = true;
+            }
+        }
+
+        const ActionState st = (mode == Mode::Sequence)
+            ? seq.steps[seqStep]
+            : pose::stateByIndex(stateIdx);
+        pose::Anim& an = pose::animFor(st);
+        const int animFrame = (mode == Mode::Sequence) ? seqStepFrame : frame;
+
+        // --- Selection -------------------------------------------------------
+        if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressed(KEY_N)) {
+            if (mode == Mode::Sequence) {
+                seqIdx = (seqIdx + 1) % pose::sequenceCount();
+            } else {
+                stateIdx = (stateIdx + 1) % pose::stateCount();
+            }
+            frame = 0;
+            ghostCount = 0;
         }
         if (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_P)) {
-            stateIdx = (stateIdx - 1 + pose::stateCount()) % pose::stateCount();
+            if (mode == Mode::Sequence) {
+                seqIdx = (seqIdx - 1 + pose::sequenceCount()) % pose::sequenceCount();
+            } else {
+                stateIdx = (stateIdx - 1 + pose::stateCount()) % pose::stateCount();
+            }
             frame = 0;
+            ghostCount = 0;
         }
+        if (IsKeyPressed(KEY_L)) loopSeq = !loopSeq;
 
         // --- Field selection and editing -------------------------------------
         if (IsKeyPressed(KEY_DOWN)) field = (field + 1) % kFieldCount;
@@ -107,6 +154,15 @@ int main() {
         if (IsKeyPressed(KEY_PERIOD)) { ++frame; playing = false; }
         if (IsKeyPressed(KEY_R)) frame = 0;
         if (playing) ++frame;
+
+        // Capture a ghost every few frames while playing. Fast actions (a dash, a
+        // roll) are otherwise a blur; the trail makes the arc of motion visible.
+        if (playing && ++ghostTimer >= 4) {
+            ghostTimer = 0;
+            for (int i = 9; i > 0; --i) ghosts[i] = ghosts[i - 1];
+            ghosts[0] = Ghost{pose::poseFor(st, animFrame, 0), 0};
+            if (ghostCount < 10) ++ghostCount;
+        }
 
         if (IsKeyPressed(KEY_G)) showGrid = !showGrid;
         if (IsKeyPressed(KEY_S)) sideBySide = !sideBySide;
@@ -141,10 +197,21 @@ int main() {
             }
         }
 
+        const float cx = kScreenW * 0.5f;
+
+        // Motion trail, oldest and faintest first.
+        for (int i = ghostCount - 1; i >= 1; --i) {
+            const float fade = 1.0f - static_cast<float>(i) / 10.0f;
+            const unsigned char alpha = static_cast<unsigned char>(50.0f * fade);
+            stick::Frame gf{cx - static_cast<float>(i) * figH * 0.035f, groundY,
+                            figH, 1};
+            stick::drawPose(ghosts[i].pose, gf,
+                            Color{90, 140, 190, alpha}, figH * 0.02f);
+        }
+
         // The animated figure, centre stage.
-        const float cx = sideBySide ? kScreenW * 0.5f : kScreenW * 0.5f;
         stick::Frame mainFrame{cx, groundY, figH, 1};
-        stick::drawState(st, frame, 0, mainFrame, Color{120, 200, 255, 255},
+        stick::drawState(st, animFrame, 0, mainFrame, Color{120, 200, 255, 255},
                          figH * 0.028f);
 
         // Keyframes either side, dimmed, so you can see where the motion starts and
@@ -162,24 +229,47 @@ int main() {
 
         // A left-facing copy, to confirm mirroring reads correctly.
         stick::Frame mirror{kScreenW * 0.5f + figH * 0.75f, groundY, figH * 0.55f, -1};
-        stick::drawPose(pose::poseFor(st, frame, 0), mirror,
+        stick::drawPose(pose::poseFor(st, animFrame, 0), mirror,
                         Color{80, 90, 105, 180}, figH * 0.018f);
 
         // --- HUD -------------------------------------------------------------
         char line[256];
-        std::snprintf(line, sizeof(line), "%s   (%d/%d)",
-                      pose::stateLabel(st), stateIdx + 1, pose::stateCount());
-        DrawText(line, 24, 20, 32, Color{230, 235, 245, 255});
+        if (mode == Mode::Sequence) {
+            std::snprintf(line, sizeof(line), "SEQUENCE: %s   (%d/%d)",
+                          seq.name, seqIdx + 1, pose::sequenceCount());
+        } else {
+            std::snprintf(line, sizeof(line), "%s   (%d/%d)",
+                          pose::stateLabel(st), stateIdx + 1, pose::stateCount());
+        }
+        DrawText(line, 24, 20, 30, Color{230, 235, 245, 255});
 
         std::snprintf(line, sizeof(line),
-                      "frame %d   %s   editing keyframe %s   %s",
+                      "frame %d   %s   editing keyframe %s   %s%s",
                       frame, playing ? "playing" : "PAUSED",
                       editingB ? "B" : "A",
-                      an.hasB ? (an.loop ? "cycle" : "lerp") : "hold");
-        DrawText(line, 24, 58, 18, Color{160, 175, 195, 255});
+                      an.hasB ? (an.loop ? "cycle" : "lerp") : "hold",
+                      (mode == Mode::Sequence && loopSeq) ? "   [looping]" : "");
+        DrawText(line, 24, 56, 18, Color{160, 175, 195, 255});
+
+        // In sequence mode, show the chain with the active step highlighted -- so it
+        // is obvious WHICH transition you are looking at when something snaps.
+        if (mode == Mode::Sequence) {
+            int tx = 24;
+            const int ty = 80;
+            for (int i = 0; i < seq.count; ++i) {
+                const bool active = (i == seqStep);
+                const char* lbl = pose::stateLabel(seq.steps[i]);
+                std::snprintf(line, sizeof(line), "%s%s", lbl,
+                              i + 1 < seq.count ? "  >  " : "");
+                DrawText(line, tx, ty, 17,
+                         active ? Color{255, 220, 120, 255}
+                                : Color{110, 122, 138, 255});
+                tx += MeasureText(line, 17);
+            }
+        }
 
         // Field list, current one highlighted.
-        int y = 100;
+        int y = (mode == Mode::Sequence) ? 116 : 100;
         for (int i = 0; i < kFieldCount; ++i) {
             const bool sel = (i == field);
             std::snprintf(line, sizeof(line), "%s %-11s %7.2f",
@@ -191,7 +281,8 @@ int main() {
         }
 
         const char* help =
-            "[ ]  prev/next state       UP/DOWN  select field\n"
+            "M  single <-> SEQUENCE mode   L  loop\n"
+            "[ ]  prev/next state or sequence   UP/DOWN  select field\n"
             "LEFT/RIGHT  adjust (hold SHIFT for x4)\n"
             "TAB  switch keyframe A/B   SPACE  play/pause\n"
             ",  .  step frame           R  restart\n"

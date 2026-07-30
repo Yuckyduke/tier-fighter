@@ -76,7 +76,9 @@ reads correctly.
 
 | Key | Action |
 |---|---|
-| `[` `]` | Previous / next state |
+| `M` | Switch single ↔ sequence mode |
+| `L` | Toggle sequence looping |
+| `[` `]` | Previous / next state (or sequence) |
 | `↑` `↓` | Select joint |
 | `←` `→` | Adjust it (hold `Shift` for ×4) |
 | `Tab` | Switch between keyframe A and B |
@@ -92,16 +94,59 @@ On screen: the animated figure centre stage, keyframes A and B dimmed either sid
 you can see where the motion starts and ends without scrubbing, and a small mirrored
 copy to confirm facing-left reads correctly.
 
+## Sequence mode
+
+A pose in isolation says very little. What usually reads badly is the **transition**:
+a lean that snaps between idle and dash, a figure that pops up too fast out of
+landing, limbs that jump rather than travel.
+
+Press `M` to switch between **single** mode (isolate one state, edit angles) and
+**sequence** mode (chain states back-to-back, each held for its own duration).
+
+Twenty sequences ship, each chosen to expose a specific seam rather than to
+enumerate states:
+
+| Sequence | The seam it exposes |
+|---|---|
+| stand → walk → stop | Does walking start and stop smoothly? |
+| dash → run → brake | The commit from burst to sprint |
+| dash-dance | Rapid reversal — the harshest test of the turn pose |
+| full jump and land | Compression, flight, absorption |
+| **wavedash** | The airdodge → landing seam. The technique *is* momentum surviving this, so it has to flow |
+| aerial into landing | Attack recovery into ground contact |
+| hit → knockdown → get up | The longest chain; passes through several extremes |
+| hit → tech | The alternative to the above, for comparison |
+| shield → roll out | Defensive option select |
+| shield hit → break → dizzy | The full punish chain |
+| grab → pummel → throw | Both the pummel loop and the throw commit |
+| thrown → land | Victim side of the same exchange |
+| ledge → climb / attack / jump | Three exits from one hanging pose |
+| airdodge → helpless → land | Commitment and its cost |
+
+In sequence mode the chain is drawn across the top with the active step highlighted,
+so when something snaps you can see *which* transition is at fault. Editing still
+works — the arrow keys adjust whichever state is currently playing.
+
+### Motion trail
+
+Fast actions are a blur at 60fps. A fading trail of recent poses is drawn behind the
+figure while playing, so the arc of a dash or a roll is legible. Most useful for the
+cyclic states, where the extremes matter more than any single frame.
+
 ## Workflow
 
 1. `./build/tf_poses`
-2. Page through with `]` until something reads badly
-3. `Tab` to the keyframe that's wrong, `↑↓` to the joint, `←→` to adjust
-4. `Space` to watch it in motion, `,` `.` to scrub individual frames
-5. `D` to print the pose
-6. Paste it into the table in `skeleton.cpp`
+2. Press `M` for sequence mode and page through with `]` — transitions expose more
+   than isolated poses do
+3. When something snaps, note which step is highlighted, then press `M` to isolate
+   that state
+4. `Tab` to the keyframe that's wrong, `↑↓` to the joint, `←→` to adjust
+5. `Space` to watch it in motion, `,` `.` to scrub individual frames
+6. `D` to print the pose
+7. Paste it into the table in `skeleton.cpp`, then `M` back to the sequence to
+   confirm the transition now flows
 
-Step 5 is what makes iteration fast — the dump is in exactly the `P(...)` form the
+Step 6 is what makes iteration fast — the dump is in exactly the `P(...)` form the
 table uses, so there's no guessing which number produced what you saw.
 
 The table is shared between the editor and the game, so a pose tuned here improves

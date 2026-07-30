@@ -259,7 +259,7 @@ Pose blend(const Pose& a, const Pose& b, float t) {
 
 // How long a state naturally lasts, so a Lerp spans it rather than a magic number.
 // Only used for presentation timing; a wrong value looks slightly off but cannot
-// affect the simulation.
+// affect the simulation. Shared with sequence playback via stateDuration().
 int naturalDuration(ActionState st) {
     const auto& F = config::kFighters[config::CHAR_SCOUT];
     switch (st) {
@@ -310,6 +310,138 @@ Pose poseFor(ActionState st, int stateFrame, uint8_t attackId) {
     if (t > 1.0f) t = 1.0f;
     if (t < 0.0f) t = 0.0f;
     return blend(an.a, an.b, t);
+}
+
+// --- Sequences ---------------------------------------------------------------
+// Chains a player would actually perform. Each exists to expose a specific seam:
+// where two poses meet and the motion either flows or snaps.
+namespace {
+
+constexpr Sequence kSequences[] = {
+    {"stand -> walk -> stop",
+     {ActionState::Idle, ActionState::Walk, ActionState::Idle}, 3},
+
+    {"dash -> run -> brake",
+     {ActionState::Idle, ActionState::Dash, ActionState::Run,
+      ActionState::RunBrake, ActionState::Idle}, 5},
+
+    // The dash-dance seam: dash, reverse through a turn, dash back.
+    {"dash-dance",
+     {ActionState::Dash, ActionState::Turn, ActionState::Dash,
+      ActionState::Turn, ActionState::Dash}, 5},
+
+    {"full jump and land",
+     {ActionState::Idle, ActionState::Jumpsquat, ActionState::Airborne,
+      ActionState::Landing, ActionState::Idle}, 5},
+
+    // The wavedash: the airdodge -> landing seam is the one that must flow, since
+    // the whole technique is momentum surviving that transition.
+    {"wavedash",
+     {ActionState::Jumpsquat, ActionState::Airborne, ActionState::AirDodge,
+      ActionState::Landing, ActionState::Idle}, 5},
+
+    {"aerial into landing",
+     {ActionState::Airborne, ActionState::AttackAir, ActionState::Landing,
+      ActionState::Idle}, 4},
+
+    {"ground attack",
+     {ActionState::Idle, ActionState::AttackGround, ActionState::Idle}, 3},
+
+    // Getting hit and recovering -- the longest chain, and where a bad pose is most
+    // obvious because the figure passes through several extremes.
+    {"hit -> knockdown -> get up",
+     {ActionState::Hitstun, ActionState::Bounce, ActionState::DownWait,
+      ActionState::GetUp, ActionState::Idle}, 5},
+
+    {"hit -> tech",
+     {ActionState::Hitstun, ActionState::Tech, ActionState::Idle}, 3},
+
+    {"shield -> roll out",
+     {ActionState::Idle, ActionState::ShieldOn, ActionState::Shield,
+      ActionState::RollForward, ActionState::Idle}, 5},
+
+    {"shield -> spotdodge",
+     {ActionState::ShieldOn, ActionState::Shield, ActionState::SpotDodge,
+      ActionState::Idle}, 4},
+
+    {"shield hit -> break -> dizzy",
+     {ActionState::Shield, ActionState::ShieldStun, ActionState::ShieldBroken,
+      ActionState::Dizzy, ActionState::Idle}, 5},
+
+    {"grab -> pummel -> throw",
+     {ActionState::Grabbing, ActionState::GrabHold, ActionState::Pummel,
+      ActionState::GrabHold, ActionState::Throwing, ActionState::Idle}, 6},
+
+    {"grabbed -> escape",
+     {ActionState::Grabbed, ActionState::GrabRelease, ActionState::Idle}, 3},
+
+    {"thrown -> land",
+     {ActionState::Thrown, ActionState::Hitstun, ActionState::Bounce,
+      ActionState::DownWait, ActionState::GetUp}, 5},
+
+    {"ledge -> climb",
+     {ActionState::Airborne, ActionState::LedgeHang, ActionState::LedgeClimb,
+      ActionState::Idle}, 4},
+
+    {"ledge -> attack",
+     {ActionState::LedgeHang, ActionState::LedgeAttack, ActionState::Idle}, 3},
+
+    {"ledge -> jump away",
+     {ActionState::LedgeHang, ActionState::LedgeJump, ActionState::Airborne,
+      ActionState::Landing}, 4},
+
+    {"airdodge -> helpless -> land",
+     {ActionState::Airborne, ActionState::AirDodge, ActionState::FallHelpless,
+      ActionState::Landing, ActionState::Idle}, 5},
+
+    {"KO",
+     {ActionState::Hitstun, ActionState::Dead}, 2},
+};
+
+constexpr int kSequenceCount =
+    static_cast<int>(sizeof(kSequences) / sizeof(kSequences[0]));
+
+// Cyclic states have no natural end, so a sequence holds them for a readable beat
+// rather than forever.
+constexpr int kCycleHoldFrames = 48;
+
+}  // namespace
+
+int stateDuration(ActionState st) {
+    const Anim& an = kAnims[indexOf(st)];
+    if (an.loop) {
+        // A cycling animation would never finish; hold it for a couple of cycles so
+        // the motion is legible without stalling the sequence.
+        const int cyc = an.frames > 0 ? an.frames * 2 : kCycleHoldFrames;
+        return cyc < kCycleHoldFrames ? kCycleHoldFrames : cyc;
+    }
+    if (!an.hasB) return kCycleHoldFrames / 2;   // a static hold still needs a beat
+    return naturalDuration(st);
+}
+
+int sequenceCount() { return kSequenceCount; }
+const Sequence& sequenceAt(int i) {
+    if (i < 0) i = 0;
+    if (i >= kSequenceCount) i = kSequenceCount - 1;
+    return kSequences[i];
+}
+
+bool sequenceSample(const Sequence& seq, int frame, int* outStep,
+                    int* outStepFrame) {
+    if (frame < 0) frame = 0;
+    int remaining = frame;
+    for (int i = 0; i < seq.count; ++i) {
+        const int dur = stateDuration(seq.steps[i]);
+        if (remaining < dur) {
+            *outStep = i;
+            *outStepFrame = remaining;
+            return true;
+        }
+        remaining -= dur;
+    }
+    *outStep = seq.count - 1;
+    *outStepFrame = stateDuration(seq.steps[seq.count - 1]);
+    return false;
 }
 
 Anim& animFor(ActionState st) { return kAnims[indexOf(st)]; }
