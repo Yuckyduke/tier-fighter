@@ -22,23 +22,30 @@ never safe: you can survive a stream of arrivals only as long as you keep
 converting. Take damage without scoring and you're as launchable as anyone else.
 Dominance is rewarded; camping isn't.
 
-## Building
+## Quickstart
 
-Requires a C++20 compiler and CMake 3.20+. [raylib](https://www.raylib.com/) is
-optional — without it the tests still build, you just don't get the playable client.
+Clone to playing, in full:
 
 ```sh
-# macOS
+# 1. Dependencies  (macOS)
 brew install cmake raylib
+#                 (Debian/Ubuntu)
+# sudo apt install cmake libraylib-dev
 
-# Debian/Ubuntu
-apt install cmake libraylib-dev
-```
-
-```sh
+# 2. Build
 cmake -S . -B build
 cmake --build build
+
+# 3. Play
+./build/tf_play
 ```
+
+The build step is required before `./build/tf_play` exists — `build/` is
+generated, not checked in.
+
+Needs a C++20 compiler and CMake 3.20+. [raylib](https://www.raylib.com/) is
+optional: without it the tests still build, you just don't get the playable
+client (CMake will warn and skip the `tf_play` target).
 
 ## Running
 
@@ -47,6 +54,17 @@ cmake --build build
 ./build/tf_tests         # simulation tests
 ./build/tf_arena_tests   # arena / matchmaking tests
 ```
+
+After changing anything in `src/`, rebuild and relaunch:
+
+```sh
+cmake --build build && ./build/tf_play
+```
+
+`tf_play` is a **local sparring build** — two players at one keyboard, one stage,
+no arena routing and no netcode. The arena described above (stage pooling, KO
+scoring, streaks, routing) is implemented and tested in `src/sim/arena.cpp` but
+not yet wired to the client.
 
 ### Controls
 
