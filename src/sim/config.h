@@ -192,6 +192,94 @@ struct Hitlag {
     fx attackerFraction = kFxOne;
 };
 
+// --- Shield ------------------------------------------------------------------
+// Mirrors the Guard* family. Four states: startup, hold, release, and shieldstun.
+//
+// Shield HEALTH is one value with three independent flows, and all three matter:
+//   - drains every frame it is held
+//   - REGENERATES every frame it is not active (including during release lag)
+//   - takes damage on hit: a proportional term PLUS a flat cost per hit
+// The flat cost is what makes many weak hits meaningfully worse than one big one.
+//
+// A subtlety worth preserving: shieldstun scales with the LARGEST single hit
+// absorbed, while health loss scales with the SUM. Two different accumulators --
+// collapsing them into one would make multi-hit moves behave wrongly.
+//
+// Deliberately NOT implemented: powershield (its own timer web plus reflect
+// hitboxes -- a feature in its own right), analog light-shield gradations (we have
+// digital buttons; hardness is left as a hook), and shield tilting (positional
+// only, no hurtbox effect).
+struct Shield {
+    fx maxHealth = fxi(60);
+    fx drainPerFrame = fx_ratio(15, 100); // cost of simply holding it
+    fx regenPerFrame = fx_ratio(7, 100);  // while NOT shielding
+    // Damage taken: proportional to the hit, plus a flat cost per hit.
+    fx damageScale = fx_ratio(12, 10);
+    fx damageFlat = fx_ratio(30, 10);
+
+    int startupFrames = 3;  // shield is already active; this is the grow-in
+    int releaseFrames = 12; // the lag that makes shielding a commitment
+    int minHoldFrames = 4;  // cannot release before this, even if you let go
+
+    // Shieldstun: frames = largestHit * scale + flat.
+    fx stunScale = fx_ratio(45, 100);
+    fx stunFlat = fx_ratio(20, 10);
+    int stunMaxFrames = 30;
+
+    // Pushback on the shielding player, away from the attacker. Capped so a big
+    // hit cannot shove someone across the stage.
+    fx pushbackScale = fx_ratio(18, 100);
+    fx pushbackCap = fx_ratio(28, 10);
+    // Pushback on the ATTACKER, scaled by the damage they dealt. This is what
+    // makes hitting a shield a positional loss rather than free pressure.
+    fx attackerPushScale = fx_ratio(9, 100);
+    fx attackerPushFlat = fx_ratio(4, 10);
+};
+
+// --- Shield break / dizzy ----------------------------------------------------
+// Running the shield to zero launches you upward helpless, then leaves you dizzy.
+//
+// The dizzy duration SHRINKS as damage rises (their x2F8 - percent formula) and is
+// mashable. Both are deliberate: a shield break at low percent is a much longer
+// punish window than one at high percent, which keeps the mechanic from being an
+// automatic kill late in a stock.
+struct ShieldBreak {
+    fx launchVelY = fx_ratio(-45, 10);
+    int dizzyBase = 240;                   // at 0% damage
+    fx dizzyPerDamage = fx_ratio(-12, 10); // negative: more damage, shorter dizzy
+    int dizzyMin = 60;
+    // Mash drain, matching their two independent inputs per frame.
+    fx mashPerInput = fxi(6);
+    fx drainPerFrame = fxi(1);
+};
+
+// --- Ground escapes (roll / spotdodge) ---------------------------------------
+// Mirrors the Escape* family. Two mechanics with a deliberate asymmetry:
+//
+//   ROLL travels a FIXED authored distance. Melee drives it from the animation's
+//   root-bone delta, which discards entry momentum and ends dead stopped. We
+//   interpolate over the duration for the same result: a roll always covers the
+//   same ground regardless of how fast you entered it.
+//
+//   SPOTDODGE is plain friction decay and KEEPS residual momentum -- it does not
+//   zero velocity on exit either. So spotdodging out of a run slides, while
+//   rolling never does. That asymmetry is intentional in the original.
+//
+// Invulnerability in Melee is a hurtbox flag set by animation timeline events, so
+// per-character windows cost nothing there. We use a single invuln countdown at
+// lower resolution, which is the same idea -- and since the frame numbers are ours
+// to choose anyway, it is a simplification rather than a compromise.
+struct GroundEscape {
+    int rollFrames = 32;
+    int rollInvulnStart = 4; // vulnerable on the first few frames
+    int rollInvulnFrames = 16;
+    fx rollDistance = fxi(80);
+
+    int dodgeFrames = 24;
+    int dodgeInvulnStart = 2;
+    int dodgeInvulnFrames = 14;
+};
+
 // --- SDI (smash directional influence) --------------------------------------
 // Flick the stick during hitlag and you shift POSITION -- not velocity.
 //
@@ -713,6 +801,8 @@ struct Fighter {
     Landing landing;
     Knockdown knockdown;
     Ledge ledge;
+    Shield shield;
+    GroundEscape escape;
 
     // Per-character attacks. A heavy character's smash should not share numbers
     // with a fast one, so the whole table belongs to the fighter -- this pointer
@@ -810,6 +900,8 @@ constexpr Fighter kFighters[CHAR_COUNT] = {
         Landing{},
         Knockdown{},
         Ledge{},
+        Shield{},
+        GroundEscape{},
         kScoutAttacks,
     },
 
@@ -893,6 +985,35 @@ constexpr Fighter kFighters[CHAR_COUNT] = {
             /*jumpVelY*/ fx_ratio(-52, 10),
             /*jumpVelX*/ fx_ratio(10, 10),
         },
+        // Heavier: a bigger shield that drains slower, but far more release lag and
+        // slower escapes. Durability traded against options -- the same axis the
+        // knockdown and ledge values use.
+        Shield{
+            .maxHealth = fxi(78),
+            .drainPerFrame = fx_ratio(12, 100),
+            .regenPerFrame = fx_ratio(6, 100),
+            .damageScale = fx_ratio(11, 10),
+            .damageFlat = fx_ratio(28, 10),
+            .startupFrames = 4,
+            .releaseFrames = 16,
+            .minHoldFrames = 5,
+            .stunScale = fx_ratio(42, 100),
+            .stunFlat = fx_ratio(20, 10),
+            .stunMaxFrames = 30,
+            .pushbackScale = fx_ratio(14, 100),
+            .pushbackCap = fx_ratio(24, 10),
+            .attackerPushScale = fx_ratio(10, 100),
+            .attackerPushFlat = fx_ratio(5, 10),
+        },
+        GroundEscape{
+            .rollFrames = 40,
+            .rollInvulnStart = 5,
+            .rollInvulnFrames = 18,
+            .rollDistance = fxi(72),
+            .dodgeFrames = 30,
+            .dodgeInvulnStart = 3,
+            .dodgeInvulnFrames = 16,
+        },
         kBruiserAttacks,
     },
 };
@@ -904,6 +1025,7 @@ constexpr Knockback kKnockback{};
 constexpr Hitstun kHitstun{};
 constexpr Hitlag kHitlag{};
 constexpr SDI kSDI{};
+constexpr ShieldBreak kShieldBreak{};
 constexpr DirectionalInfluence kDI{};
 constexpr Respawn kRespawn{};
 constexpr StickThresholds kStick{};

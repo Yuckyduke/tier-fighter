@@ -42,6 +42,7 @@ using config::Knockback;
 using config::Knockdown;
 using config::kRespawn;
 using config::kSDI;
+using config::kShieldBreak;
 using config::kSmash;
 using config::kStick;
 using config::Ledge;
@@ -231,6 +232,142 @@ void applyGroundFriction(Player &p) {
     p.selfVelX = fx_decay(p.selfVelX, friction);
 }
 
+// --- Shield ----------------------------------------------------------------
+
+// Shield health lazily initialises to full on first use, so Player stays POD with
+// no constructor -- a requirement for the memcpy-based rollback snapshots.
+void ensureShieldInit(Player &p) {
+    if (!p.shieldInit) {
+        p.shieldHealth = fighterOf(p).shield.maxHealth;
+        p.shieldInit = true;
+    }
+}
+
+bool isShieldState(const Player &p) {
+    return p.state == ActionState::ShieldOn || p.state == ActionState::Shield ||
+           p.state == ActionState::ShieldStun;
+}
+
+// States where the shield must NOT regenerate. Distinct from isShieldState: a
+// broken shield is not "active", but refilling it while the victim is still being
+// punished would erase the entire cost of breaking it.
+bool blocksShieldRegen(const Player &p) {
+    return isShieldState(p) || p.state == ActionState::ShieldBroken ||
+           p.state == ActionState::Dizzy;
+}
+
+// Regenerate whenever the shield is NOT active. Runs during release lag too, which
+// is what makes shield-pressure sustainable rather than a one-shot resource.
+void regenShield(Player &p) {
+    const config::Shield &S = fighterOf(p).shield;
+    ensureShieldInit(p);
+    if (blocksShieldRegen(p)) return;
+    if (p.shieldHealth < S.maxHealth) {
+        p.shieldHealth = fx_min(p.shieldHealth + S.regenPerFrame, S.maxHealth);
+    }
+}
+
+// Break the shield: launched helpless, then dizzy. Dizzy length SHRINKS with
+// damage, so a break at low percent is a far longer punish than one at high --
+// which stops the mechanic from being a free kill late in a stock.
+void breakShield(Player &p) {
+    const Fighter &F = fighterOf(p);
+    p.shieldHealth = 0;
+    p.selfVelY = kShieldBreak.launchVelY;
+    p.selfVelX = 0;
+
+    int32_t dizzy =
+        kShieldBreak.dizzyBase + fx_to_int(fx_mul(p.damage, kShieldBreak.dizzyPerDamage));
+    if (dizzy < kShieldBreak.dizzyMin) dizzy = kShieldBreak.dizzyMin;
+    p.dizzyFrames = static_cast<uint16_t>(dizzy);
+
+    p.shieldStunFrames = 0;
+    p.shieldHoldFrames = 0;
+    (void)F;
+    enterState(p, ActionState::ShieldBroken);
+}
+
+// Apply a hit to a shield. Returns true if the shield absorbed it.
+//
+// Two accumulators, deliberately: shieldstun scales with the LARGEST single hit,
+// health loss with the SUM. Collapsing them would make multi-hit moves wrong.
+bool absorbOnShield(Player &d, Player &a, fx moveDamage, int8_t attackerFacing) {
+    const config::Shield &S = fighterOf(d).shield;
+    ensureShieldInit(d);
+
+    // Health: proportional term plus a FLAT cost per hit, so many weak hits are
+    // meaningfully worse for the shield than one big one.
+    d.shieldDamageSum += moveDamage;
+    if (moveDamage > d.shieldLargestHit) d.shieldLargestHit = moveDamage;
+    d.shieldHealth -= fx_mul(moveDamage, S.damageScale) + S.damageFlat;
+
+    if (d.shieldHealth <= 0) {
+        breakShield(d);
+        return true;
+    }
+
+    // Shieldstun from the largest hit.
+    int32_t stun = fx_to_int(fx_mul(d.shieldLargestHit, S.stunScale) + S.stunFlat);
+    if (stun < 1) stun = 1;
+    if (stun > S.stunMaxFrames) stun = S.stunMaxFrames;
+    d.shieldStunFrames = static_cast<uint8_t>(stun);
+
+    // Pushback, LATCHED rather than applied now.
+    //
+    // Hitlag is set on this same frame, so the freeze runs first -- and the frozen
+    // states call applyGroundFriction, which would eat a small velocity entirely
+    // before it ever moved anyone (the two-tier friction is deliberately strong at
+    // low speed). Latching and applying on the frame the freeze lifts is what makes
+    // the push actually land.
+    fx push = fx_mul(fxi(stun), S.pushbackScale);
+    push = fx_min(push, S.pushbackCap);
+    d.pendingPushX = push * (attackerFacing > 0 ? 1 : -1);
+
+    // The ATTACKER is pushed too -- hitting a shield is a positional loss, not free
+    // pressure. That cost is what makes shielding a real answer to offence.
+    const fx aPush = fx_mul(moveDamage, S.attackerPushScale) + S.attackerPushFlat;
+    a.pendingPushX = -aPush * attackerFacing;
+
+    enterState(d, ActionState::ShieldStun);
+    return true;
+}
+
+// --- Ground escapes --------------------------------------------------------
+
+void startRoll(Player &p, int8_t dir) {
+    const config::GroundEscape &E = fighterOf(p).escape;
+    p.escapeDir = dir;
+    p.rollStartX = p.x;
+    p.selfVelX = 0;
+    p.invulnFrames = 0; // granted once the invuln window opens, not immediately
+    enterState(p, dir == p.facing ? ActionState::RollForward : ActionState::RollBack);
+    (void)E;
+}
+
+void startSpotDodge(Player &p) {
+    p.invulnFrames = 0;
+    enterState(p, ActionState::SpotDodge);
+}
+
+// Escape inputs available out of shield. Spotdodge is checked BEFORE roll, matching
+// their IASA ordering -- so a down-forward diagonal gives a spotdodge, not a roll.
+// Returns true if an escape started.
+bool checkEscapeInputs(Player &p, const Input &in) {
+    // Down -> spotdodge. Requires a FRESH flick, same recency primitive as
+    // smash-vs-tilt, fast-fall, and SDI.
+    if (in.stickY >= kSmash.deflection && p.stickHeldY < kSmash.flickWindow) {
+        startSpotDodge(p);
+        return true;
+    }
+    // Sideways -> roll.
+    if ((in.stickX >= kSmash.deflection || in.stickX <= -kSmash.deflection) &&
+        p.stickHeldX < kSmash.flickWindow) {
+        startRoll(p, in.stickX > 0 ? 1 : -1);
+        return true;
+    }
+    return false;
+}
+
 void applyGravity(Player &p) {
     const Fighter &F = fighterOf(p);
     const fx cap = p.fastFalling ? F.air.fastFallSpeed : F.air.termVelocity;
@@ -374,6 +511,20 @@ void accelGround(Player &p, fx accel, fx target, bool taper) {
 // Shared entry checks for every actionable grounded state: jump and attack.
 // Returns true if a new action was started.
 bool checkGroundActions(Player &p, const Input &in, const Input &prev) {
+    // Shield first: it is the only genuinely free use of a grounded shield press.
+    // (BtnShield already drives air dodge, L-cancel, tech, get-up buffering and
+    // ledge roll -- all in states that are not actionable-grounded, so there is no
+    // collision here.)
+    if (in.held(BtnShield)) {
+        ensureShieldInit(p);
+        if (p.shieldHealth > 0) {
+            p.shieldHoldFrames = 0;
+            p.shieldLargestHit = 0;
+            p.shieldDamageSum = 0;
+            enterState(p, ActionState::ShieldOn);
+            return true;
+        }
+    }
     if (in.pressed(BtnJump, prev)) {
         enterState(p, ActionState::Jumpsquat);
         p.jumpHeld = true;
@@ -654,6 +805,21 @@ void resolveAttack(GameState &gs, int attackerIdx, const Input inputs[kMaxPlayer
         // the stage. See fx_len_sq in fixed.h.
         if (fx_len_sq(dx, dy) > fx_sq(atk.radius)) continue;
 
+        // Shielded? The shield eats it: no damage, no knockback, no hitstun. Both
+        // players get pushed apart instead, and the defender takes shieldstun.
+        // Checked here -- after the overlap test but before anything is applied --
+        // so a shielded hit never touches the damage or knockback pipeline.
+        if (isShieldState(d)) {
+            absorbOnShield(d, a, dmg, a.facing);
+            const uint8_t lagS = computeHitlag(dmg, /*crouching*/ false);
+            d.hitlagFrames = lagS;
+            a.hitlagFrames = lagS;
+            d.sdiNudges = 0;
+            a.sdiNudges = 0;
+            a.attackConnected = true;
+            break;
+        }
+
         // Charge-scaled damage feeds BOTH the knockback formula and the victim's
         // percent, so a charged smash launches further now and leaves them easier
         // to launch next time.
@@ -872,6 +1038,13 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
             continue;
         }
 
+        // Shield pushback latched during hitlag lands now, on the first unfrozen
+        // frame -- see absorbOnShield for why it cannot be applied at hit time.
+        if (p.pendingPushX != 0) {
+            p.selfVelX = p.pendingPushX;
+            p.pendingPushX = 0;
+        }
+
         // Stick timers must update BEFORE any input is consumed this frame, since
         // attack selection reads them to tell a flick from a hold.
         updateStickTimers(p, in, prev);
@@ -880,6 +1053,15 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
         if (p.lcancelTimer > 0) p.lcancelTimer--;
         if (p.techLockout > 0) p.techLockout--;
         if (p.ledgeCooldown > 0) p.ledgeCooldown--;
+
+        // Shield regenerates every frame it is NOT active -- including during the
+        // release lag, which is what keeps shield pressure sustainable instead of
+        // being a one-shot resource.
+        regenShield(p);
+        if (!isShieldState(p)) {
+            p.shieldLargestHit = 0;
+            p.shieldDamageSum = 0;
+        }
         if (in.pressed(BtnShield, prev)) {
             p.lcancelTimer = static_cast<uint8_t>(F.landing.lcancelWindow);
         }
@@ -1282,6 +1464,159 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
             if (p.groundActionFrames == 0 || p.selfVelX == 0) { enterState(p, ActionState::Idle); }
             break;
 
+            // --- Shield family ---------------------------------------------------
+
+        case ActionState::ShieldOn:
+        case ActionState::Shield:   {
+            const config::Shield &S = F.shield;
+            ensureShieldInit(p);
+
+            applyGroundFriction(p);
+            p.shieldHealth -= S.drainPerFrame;
+            if (p.shieldHoldFrames < 0xFF) p.shieldHoldFrames++;
+
+            // Holding it to zero breaks it -- the cost of turtling.
+            if (p.shieldHealth <= 0) {
+                breakShield(p);
+                break;
+            }
+            break;
+
+            // ShieldOn is the grow-in only; the shield is already active from
+            // frame 1, so this is not a vulnerable window.
+            if (p.state == ActionState::ShieldOn &&
+                p.stateFrame + 1 >= static_cast<uint16_t>(S.startupFrames)) {
+                enterState(p, ActionState::Shield);
+            }
+
+            // Out-of-shield options, in priority order. Spotdodge before roll
+            // matches their IASA ordering, so a down-forward diagonal dodges.
+            if (checkEscapeInputs(p, in)) break;
+            if (in.pressed(BtnJump, prev)) {
+                enterState(p, ActionState::Jumpsquat);
+                p.jumpHeld = true;
+                break;
+            }
+
+            // Releasing shield costs the release lag -- but not before the
+            // minimum hold has elapsed, so you cannot tap it for free.
+            if (!in.held(BtnShield) &&
+                p.shieldHoldFrames >= static_cast<uint8_t>(S.minHoldFrames)) {
+                p.groundActionFrames = static_cast<uint8_t>(S.releaseFrames);
+                enterState(p, ActionState::ShieldOff);
+            }
+            break;
+        }
+
+        case ActionState::ShieldOff:
+            // Release lag. This is what makes shielding a commitment rather
+            // than a free defensive option. Regen runs here (see regenShield).
+            applyGroundFriction(p);
+            if (p.groundActionFrames > 0) p.groundActionFrames--;
+            if (p.groundActionFrames == 0) enterState(p, ActionState::Idle);
+            break;
+
+        case ActionState::ShieldStun:
+            // Fully locked -- no buffering out of shieldstun. That lock is what
+            // makes hitting a shield safe for the attacker and creates the
+            // shield-pressure game.
+            applyGroundFriction(p);
+            if (p.shieldStunFrames > 0) p.shieldStunFrames--;
+            if (p.shieldStunFrames == 0) {
+                // Still holding? Back to shielding. Released? Take the lag.
+                if (in.held(BtnShield) && p.shieldHealth > 0) {
+                    enterState(p, ActionState::Shield);
+                } else {
+                    p.groundActionFrames = static_cast<uint8_t>(F.shield.releaseFrames);
+                    enterState(p, ActionState::ShieldOff);
+                }
+            }
+            break;
+
+        case ActionState::ShieldBroken:
+            // Launched helpless out of a broken shield.
+            applyGravity(p);
+            p.selfVelX = fx_decay(p.selfVelX, F.air.friction);
+            break;
+
+        case ActionState::Dizzy: {
+            // Mashable, and SHORTER at high damage -- so a shield break early
+            // in a stock is a far bigger punish window than one late.
+            applyGroundFriction(p);
+            if (p.dizzyFrames > 0) p.dizzyFrames--;
+
+            // Two independent drains per frame, as in their GrabMash: any fresh
+            // button press, AND any change in stick direction. Both can fire on
+            // the same frame, which is why circling the stick works.
+            fx drain = kShieldBreak.drainPerFrame;
+            if (in.pressed(BtnJump, prev) || in.pressed(BtnAttack, prev) ||
+                in.pressed(BtnShield, prev)) {
+                drain += kShieldBreak.mashPerInput;
+            }
+            const bool stickMoved =
+                (in.stickX > kStick.deadzone) != (prev.stickX > kStick.deadzone) ||
+                (in.stickX < -kStick.deadzone) != (prev.stickX < -kStick.deadzone) ||
+                (in.stickY > kStick.deadzone) != (prev.stickY > kStick.deadzone) ||
+                (in.stickY < -kStick.deadzone) != (prev.stickY < -kStick.deadzone);
+            if (stickMoved) drain += kShieldBreak.mashPerInput;
+
+            const int32_t d = fx_to_int(drain);
+            if (p.dizzyFrames > static_cast<uint16_t>(d)) {
+                p.dizzyFrames -= static_cast<uint16_t>(d);
+            } else {
+                p.dizzyFrames = 0;
+            }
+
+            if (p.dizzyFrames == 0) {
+                p.shieldHealth = F.shield.maxHealth; // shield restored
+                enterState(p, ActionState::Idle);
+            }
+            break;
+        }
+
+            // --- Ground escapes --------------------------------------------------
+
+        case ActionState::RollForward:
+        case ActionState::RollBack:    {
+            const config::GroundEscape &E = F.escape;
+
+            // Fixed authored distance, interpolated over the duration. Melee
+            // drives this from the animation root bone, which discards entry
+            // momentum and ends dead stopped -- so a roll always covers the same
+            // ground no matter how fast you entered it.
+            const uint16_t total = static_cast<uint16_t>(E.rollFrames);
+            const fx t = fx_div(fxi(p.stateFrame + 1), fxi(total));
+            const fx travelled = fx_mul(E.rollDistance, fx_clamp(t, 0, kFxOne));
+            p.x = p.rollStartX + travelled * p.escapeDir;
+            p.selfVelX = 0;
+
+            // Invulnerable for a window in the middle, not the whole roll.
+            if (p.stateFrame == static_cast<uint16_t>(E.rollInvulnStart)) {
+                p.invulnFrames = static_cast<uint16_t>(E.rollInvulnFrames);
+            }
+
+            if (p.stateFrame + 1 >= total) {
+                p.selfVelX = 0; // rolls end stopped, no carryover
+                p.escapeDir = 0;
+                enterState(p, ActionState::Idle);
+            }
+            break;
+        }
+
+        case ActionState::SpotDodge: {
+            const config::GroundEscape &E = F.escape;
+            // Deliberately NOT like a roll: plain friction decay, and velocity
+            // is NOT zeroed on exit. Spotdodging out of a run slides.
+            applyGroundFriction(p);
+            if (p.stateFrame == static_cast<uint16_t>(E.dodgeInvulnStart)) {
+                p.invulnFrames = static_cast<uint16_t>(E.dodgeInvulnFrames);
+            }
+            if (p.stateFrame + 1 >= static_cast<uint16_t>(E.dodgeFrames)) {
+                enterState(p, ActionState::Idle);
+            }
+            break;
+        }
+
         case ActionState::Turn:
             // Standing/dash reversal. Facing is already flipped; these frames
             // are the COST of that flip. Jump and attack are available, so a
@@ -1317,6 +1652,10 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
             (p.state == ActionState::Idle || p.state == ActionState::Walk ||
              p.state == ActionState::Dash || p.state == ActionState::Run ||
              p.state == ActionState::RunBrake || p.state == ActionState::Turn ||
+             p.state == ActionState::ShieldOn || p.state == ActionState::Shield ||
+             p.state == ActionState::ShieldOff || p.state == ActionState::ShieldStun ||
+             p.state == ActionState::Dizzy || p.state == ActionState::RollForward ||
+             p.state == ActionState::RollBack || p.state == ActionState::SpotDodge ||
              p.state == ActionState::Landing || p.state == ActionState::Jumpsquat ||
              // Knockdown states are on the ground, so ground
              // friction and ground knockback decay apply.
@@ -1343,6 +1682,9 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
             (p.state == ActionState::Idle || p.state == ActionState::Walk ||
              p.state == ActionState::Dash || p.state == ActionState::Run ||
              p.state == ActionState::RunBrake || p.state == ActionState::Turn ||
+             p.state == ActionState::ShieldOn || p.state == ActionState::Shield ||
+             p.state == ActionState::ShieldOff || p.state == ActionState::ShieldStun ||
+             p.state == ActionState::Dizzy || p.state == ActionState::SpotDodge ||
              p.state == ActionState::Landing || p.state == ActionState::AttackGround ||
              p.state == ActionState::GetUp || p.state == ActionState::GetUpRoll ||
              p.state == ActionState::GetUpAttack || p.state == ActionState::Tech ||
@@ -1479,6 +1821,9 @@ void step(GameState &gs, const Input inputs[kMaxPlayers], const Input prevInputs
                 p.chargeFrames = 0;
                 p.charging = false;
                 enterState(p, ActionState::Landing);
+            } else if (p.state == ActionState::ShieldBroken) {
+                p.kbVelY = 0;
+                enterState(p, ActionState::Dizzy);
             } else if (p.state == ActionState::FallHelpless) {
                 // Landing out of helplessness costs extra -- the commitment has to
                 // be paid for on the way out too, not just on the way in.
@@ -1535,6 +1880,11 @@ uint32_t checksum(const GameState &gs) {
         mix(p.hitlagFrames);
         mix(p.groundActionFrames);
         mix(p.sdiNudges);
+        mix(static_cast<uint32_t>(p.shieldHealth));
+        mix(p.shieldStunFrames);
+        mix(p.dizzyFrames);
+        mix(static_cast<uint32_t>(p.escapeDir));
+        mix(static_cast<uint32_t>(p.pendingPushX));
         mix(static_cast<uint32_t>(p.ledgeSide));
         mix(p.ledgeHangFrames);
         mix(p.ledgeCooldown);

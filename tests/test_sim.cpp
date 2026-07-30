@@ -2504,6 +2504,357 @@ SDIResult sdiTrial(int flickPeriod, int8_t flickX, int8_t flickY) {
     return r;
 }
 
+// --- Shield ------------------------------------------------------------------
+
+// Put a player in shield, then hold for `holdFrames`, and report the state.
+GameState shieldedPlayer(int holdFrames, uint8_t charId) {
+    GameState gs = makeMatch(1);
+    Player &p = gs.players[0];
+    p.charId = charId;
+    p.x = fxi(500);
+    p.y = gs.stage.groundY;
+    p.facing = 1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    for (int f = 0; f < holdFrames; ++f) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(BtnShield);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    }
+    return gs;
+}
+
+void testShieldBlocksDamage() {
+    section("shield absorbs hits without taking damage");
+
+    using namespace config;
+
+    GameState gs = makeMatch(2);
+    gs.players[0].x = fxi(500);
+    gs.players[0].facing = 1;
+    gs.players[1].x = fxi(526);
+    gs.players[1].facing = -1;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](uint16_t aBtn) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(aBtn);
+        cur[1] = mk(BtnShield); // defender shields throughout
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    tick(0);
+    tick(0);
+    check(gs.players[1].shieldHealth > 0, "defender has shield health");
+    const fx healthBefore = gs.players[1].shieldHealth;
+
+    const fx attackerX0 = gs.players[0].x;
+    const fx defenderX0 = gs.players[1].x;
+
+    tick(BtnAttack);
+    for (int f = 0; f < 30; ++f)
+        tick(0);
+
+    // The whole point: a shielded hit never reaches the damage or knockback path.
+    checkEq(fx_to_int(gs.players[1].damage), 0, "shielded player takes NO damage");
+    check(gs.players[1].shieldHealth < healthBefore, "shield health absorbed it");
+
+    // Both players are pushed apart. The attacker being pushed too is what makes
+    // hitting a shield a positional loss rather than free pressure.
+    check(gs.players[1].x > defenderX0, "defender pushed AWAY from the attacker");
+    check(gs.players[0].x < attackerX0, "attacker pushed back as well");
+}
+
+void testShieldHealthFlows() {
+    section("shield health drains, regenerates, and takes flat damage");
+
+    using namespace config;
+    const auto &S = kFighters[CHAR_SCOUT].shield;
+
+    // Drain while held.
+    const GameState brief = shieldedPlayer(3, CHAR_SCOUT);
+    const GameState longer = shieldedPlayer(40, CHAR_SCOUT);
+    check(longer.players[0].shieldHealth < brief.players[0].shieldHealth,
+          "holding shield drains health");
+    check(brief.players[0].shieldHealth <= S.maxHealth, "health starts at the cap");
+
+    // Regen while NOT shielding -- including during release lag, which is what
+    // keeps shield pressure sustainable rather than a one-shot resource.
+    GameState gs = shieldedPlayer(40, CHAR_SCOUT);
+    const fx drained = gs.players[0].shieldHealth;
+
+    Input prev[tf::kMaxPlayers] = {};
+    for (int f = 0; f < 60; ++f) {
+        Input cur[tf::kMaxPlayers] = {};
+        step(gs, cur, prev); // no shield held
+        std::memcpy(prev, cur, sizeof(cur));
+    }
+    check(gs.players[0].shieldHealth > drained, "shield regenerates when released");
+    check(gs.players[0].shieldHealth <= S.maxHealth, "regen never exceeds the cap");
+
+    // Damage on hit has a FLAT component, so many weak hits cost more than the
+    // proportional term alone would suggest.
+    check(S.damageFlat > 0, "shield damage includes a flat per-hit cost");
+    check(S.damageScale > 0, "shield damage scales with the hit");
+}
+
+void testShieldstunUsesLargestHit() {
+    section("shieldstun scales with the largest hit, health with the sum");
+
+    using namespace config;
+    const auto &S = kFighters[CHAR_SCOUT].shield;
+
+    // Two SEPARATE accumulators in the original: stun from the biggest single hit,
+    // health loss from the total. Collapsing them would make multi-hit moves wrong.
+    check(S.stunScale > 0, "stun scales with damage");
+    check(S.stunMaxFrames > 0, "stun is capped");
+
+    // A heavier hit must produce more shieldstun than a light one.
+    auto stunFrom = [](uint8_t attackStick) {
+        GameState gs = makeMatch(2);
+        gs.players[0].x = fxi(500);
+        gs.players[0].facing = 1;
+        gs.players[1].x = fxi(540);
+        gs.players[1].facing = -1;
+
+        Input prev[tf::kMaxPlayers] = {};
+        auto tick = [&](uint16_t aBtn, int8_t aStick) {
+            Input cur[tf::kMaxPlayers] = {};
+            cur[0] = mk(aBtn, aStick);
+            cur[1] = mk(BtnShield);
+            step(gs, cur, prev);
+            std::memcpy(prev, cur, sizeof(cur));
+        };
+        tick(0, 0);
+        tick(0, 0);
+        tick(BtnAttack, static_cast<int8_t>(attackStick));
+        for (int f = 0; f < 30; ++f) {
+            tick(0, 0);
+            if (gs.players[1].shieldStunFrames > 0) break;
+        }
+        return gs.players[1].shieldStunFrames;
+    };
+
+    const uint8_t jabStun = stunFrom(0);    // jab: light
+    const uint8_t smashStun = stunFrom(99); // flick+attack: side smash, heavy
+    check(jabStun > 0, "a jab causes shieldstun");
+    check(smashStun > jabStun, "a smash causes MORE shieldstun than a jab");
+    check(smashStun <= S.stunMaxFrames, "stun respects the cap");
+}
+
+void testShieldBreakAndDizzy() {
+    section("holding shield to zero breaks it");
+
+    using namespace config;
+
+    // Hold until it breaks. The break chain is launch -> land -> dizzy.
+    GameState gs = makeMatch(1);
+    gs.players[0].x = fxi(500);
+    gs.players[0].y = gs.stage.groundY;
+
+    Input prev[tf::kMaxPlayers] = {};
+    bool sawBroken = false;
+    bool sawDizzy = false;
+    for (int f = 0; f < 1200; ++f) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(BtnShield);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+        if (gs.players[0].state == ActionState::ShieldBroken) sawBroken = true;
+        if (gs.players[0].state == ActionState::Dizzy) {
+            sawDizzy = true;
+            break;
+        }
+    }
+    check(sawBroken, "shield broke and launched the player");
+    check(sawDizzy, "the break leads to a dizzy state");
+    checkEq(fx_to_int(gs.players[0].shieldHealth), 0,
+            "shield does NOT regenerate during the break punish window");
+    check(gs.players[0].dizzyFrames > 0, "dizzy has a duration");
+}
+
+void testDizzyShorterAtHighDamage() {
+    section("dizzy is shorter at high damage");
+
+    using namespace config;
+
+    // Deliberate: a shield break early in a stock is a far bigger punish window
+    // than one late, which stops the mechanic being a free kill at high percent.
+    auto dizzyLength = [](fx damage) {
+        GameState gs = makeMatch(1);
+        Player &p = gs.players[0];
+        p.x = fxi(500);
+        p.y = gs.stage.groundY;
+        p.damage = damage;
+        p.shieldInit = true;
+        p.shieldHealth = fx_ratio(1, 10); // about to break
+
+        Input prev[tf::kMaxPlayers] = {};
+        for (int f = 0; f < 200; ++f) {
+            Input cur[tf::kMaxPlayers] = {};
+            cur[0] = mk(BtnShield);
+            step(gs, cur, prev);
+            std::memcpy(prev, cur, sizeof(cur));
+            if (gs.players[0].state == ActionState::ShieldBroken) break;
+        }
+        return gs.players[0].dizzyFrames;
+    };
+
+    const uint16_t lowPct = dizzyLength(0);
+    const uint16_t highPct = dizzyLength(fxi(120));
+    check(lowPct > 0, "a break at low damage produces dizzy");
+    check(highPct > 0, "a break at high damage produces dizzy");
+    check(highPct < lowPct, "dizzy is SHORTER at high damage");
+    check(highPct >= static_cast<uint16_t>(kShieldBreak.dizzyMin),
+          "dizzy never drops below the minimum");
+}
+
+void testShieldMinimumHold() {
+    section("shield cannot be released instantly");
+
+    using namespace config;
+    const auto &S = kFighters[CHAR_SCOUT].shield;
+
+    // A minimum hold stops shield being tapped for a free intangible frame.
+    GameState gs = makeMatch(1);
+    gs.players[0].x = fxi(500);
+    gs.players[0].y = gs.stage.groundY;
+
+    Input prev[tf::kMaxPlayers] = {};
+    auto tick = [&](uint16_t b) {
+        Input cur[tf::kMaxPlayers] = {};
+        cur[0] = mk(b);
+        step(gs, cur, prev);
+        std::memcpy(prev, cur, sizeof(cur));
+    };
+
+    tick(BtnShield);
+    check(gs.players[0].state == ActionState::ShieldOn, "entered shield");
+
+    // Release immediately -- must still be shielding until the minimum elapses.
+    tick(0);
+    check(gs.players[0].state == ActionState::ShieldOn ||
+              gs.players[0].state == ActionState::Shield,
+          "cannot leave shield before the minimum hold");
+
+    for (int f = 0; f < S.minHoldFrames + S.releaseFrames + 4; ++f)
+        tick(0);
+    check(gs.players[0].state == ActionState::Idle,
+          "eventually returns to neutral through the release lag");
+}
+
+// --- Ground escapes ----------------------------------------------------------
+
+void testRollAndSpotDodge() {
+    section("roll and spotdodge out of shield");
+
+    using namespace config;
+    const auto &E = kFighters[CHAR_SCOUT].escape;
+
+    // Feed a stick input out of shield and report where it led.
+    auto escapeFrom = [](int8_t sx, int8_t sy) {
+        GameState gs = makeMatch(1);
+        Player &p = gs.players[0];
+        p.x = fxi(500);
+        p.y = gs.stage.groundY;
+        p.facing = 1;
+
+        Input prev[tf::kMaxPlayers] = {};
+        auto tick = [&](int8_t x, int8_t y) {
+            Input cur[tf::kMaxPlayers] = {};
+            cur[0] = mk(BtnShield, x, y);
+            step(gs, cur, prev);
+            std::memcpy(prev, cur, sizeof(cur));
+        };
+        for (int f = 0; f < 3; ++f)
+            tick(0, 0); // settle into shield
+        const fx startX = gs.players[0].x;
+        tick(sx, sy);
+
+        struct R {
+            ActionState st;
+            fx moved;
+            int invulnFrames;
+        };
+        R r{gs.players[0].state, 0, 0};
+        for (int f = 0; f < 80; ++f) {
+            tick(0, 0);
+            if (gs.players[0].invulnFrames > 0) ++r.invulnFrames;
+            if (gs.players[0].state == ActionState::Idle) break;
+        }
+        r.moved = gs.players[0].x - startX;
+        return r;
+    };
+
+    const auto fwd = escapeFrom(99, 0);
+    check(fwd.st == ActionState::RollForward, "sideways toward facing -> roll forward");
+    check(fwd.moved > 0, "roll forward travels forward");
+    check(fwd.invulnFrames > 0, "roll has an invulnerability window");
+
+    const auto back = escapeFrom(-99, 0);
+    check(back.st == ActionState::RollBack, "sideways away from facing -> roll back");
+    check(back.moved < 0, "roll back travels backward");
+
+    const auto dodge = escapeFrom(0, 99);
+    check(dodge.st == ActionState::SpotDodge, "down -> spotdodge");
+    check(fx_abs(dodge.moved) < fxi(4), "spotdodge holds position");
+    check(dodge.invulnFrames > 0, "spotdodge has an invulnerability window");
+
+    // Roll distance is FIXED -- Melee drives it from the animation root bone, which
+    // discards entry momentum. Same distance regardless of how you entered.
+    check(fx_abs(fx_abs(fwd.moved) - E.rollDistance) < fxi(4),
+          "roll covers its configured distance");
+
+    // Spotdodge is checked BEFORE roll, matching their IASA order, so a
+    // down-forward diagonal gives a spotdodge rather than a roll.
+    const auto diagonal = escapeFrom(99, 99);
+    check(diagonal.st == ActionState::SpotDodge,
+          "a down-forward diagonal gives spotdodge, not roll");
+}
+
+void testEscapeInvulnerabilityIsWindowed() {
+    section("escape invulnerability is a window, not the whole animation");
+
+    using namespace config;
+    const auto &E = kFighters[CHAR_SCOUT].escape;
+
+    // Rolling through an attack must be possible, but the startup and recovery are
+    // vulnerable -- otherwise rolling would be a strictly dominant option.
+    check(E.rollInvulnStart > 0, "roll startup is vulnerable");
+    check(E.rollInvulnFrames < E.rollFrames, "roll is not invulnerable for its whole duration");
+    check(E.dodgeInvulnStart > 0, "spotdodge startup is vulnerable");
+    check(E.dodgeInvulnFrames < E.dodgeFrames, "spotdodge is not invulnerable throughout");
+}
+
+void testShieldIsPerCharacter() {
+    section("shield and escape values are per-character");
+
+    using namespace config;
+    const auto &sShield = kFighters[CHAR_SCOUT].shield;
+    const auto &bShield = kFighters[CHAR_BRUISER].shield;
+    const auto &sEsc = kFighters[CHAR_SCOUT].escape;
+    const auto &bEsc = kFighters[CHAR_BRUISER].escape;
+
+    // Durability traded against options -- the same axis knockdown and ledge use.
+    check(bShield.maxHealth > sShield.maxHealth, "bruiser has a bigger shield");
+    check(bShield.drainPerFrame < sShield.drainPerFrame, "bruiser's shield drains slower");
+    check(bShield.releaseFrames > sShield.releaseFrames, "bruiser pays more release lag");
+    check(bEsc.rollFrames > sEsc.rollFrames, "bruiser rolls slower");
+    check(bEsc.rollDistance < sEsc.rollDistance, "bruiser rolls a shorter distance");
+
+    // Both characters must actually be able to shield.
+    const GameState sg = shieldedPlayer(6, CHAR_SCOUT);
+    const GameState bg = shieldedPlayer(6, CHAR_BRUISER);
+    check(sg.players[0].state == ActionState::Shield ||
+              sg.players[0].state == ActionState::ShieldOn,
+          "scout can shield");
+    check(bg.players[0].state == ActionState::Shield ||
+              bg.players[0].state == ActionState::ShieldOn,
+          "bruiser can shield");
+}
+
 void testSDIShiftsPosition() {
     section("SDI shifts position during hitlag");
 
@@ -3111,6 +3462,15 @@ int main() {
     testWalkOffEdge();
     testJumpNearEdgeLandsNormally();
     testLedgeStatesSurviveWalkOffCheck();
+    testShieldBlocksDamage();
+    testShieldHealthFlows();
+    testShieldstunUsesLargestHit();
+    testShieldBreakAndDizzy();
+    testDizzyShorterAtHighDamage();
+    testShieldMinimumHold();
+    testRollAndSpotDodge();
+    testEscapeInvulnerabilityIsWindowed();
+    testShieldIsPerCharacter();
     testSDIShiftsPosition();
     testSDIRequiresReflicking();
     testSDINudgeCap();
