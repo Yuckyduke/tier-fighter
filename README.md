@@ -28,24 +28,23 @@ Clone to playing, in full:
 
 ```sh
 # 1. Dependencies  (macOS)
-brew install cmake raylib
+brew install raylib
 #                 (Debian/Ubuntu)
-# sudo apt install cmake libraylib-dev
+# sudo apt install libraylib-dev
 
 # 2. Build
-cmake -S . -B build
-cmake --build build
+make
 
 # 3. Play
-./build/tf_play
+./build/tf_play      # or just: make play
 ```
 
 The build step is required before `./build/tf_play` exists — `build/` is
 generated, not checked in.
 
-Needs a C++20 compiler and CMake 3.20+. [raylib](https://www.raylib.com/) is
-optional: without it the tests still build, you just don't get the playable
-client (CMake will warn and skip the `tf_play` target).
+Needs a C++20 compiler and `make`. [raylib](https://www.raylib.com/) is optional:
+without it the tests still build, `make` just skips the `tf_play` and `tf_poses`
+targets and says so.
 
 ## Running
 
@@ -59,8 +58,11 @@ client (CMake will warn and skip the `tf_play` target).
 After changing anything in `src/`, rebuild and relaunch:
 
 ```sh
-cmake --build build && ./build/tf_play
+make play
 ```
+
+Header dependencies are tracked, so editing a header rebuilds exactly what uses it.
+`make test` builds and runs both suites; `make poses` launches the pose editor.
 
 `tf_play` is a **local sparring build** — two players at one keyboard, one stage,
 no arena routing and no netcode. The arena described above (stage pooling, KO
