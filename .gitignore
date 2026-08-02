@@ -9,6 +9,7 @@ build/
 .idea/
 *.swp
 .DS_Store
+compile_commands.json
 
 # Python
 __pycache__/
